@@ -1,0 +1,8 @@
+{
+  "include": ["src", "tests"],
+  "extraPaths": ["src"],
+  "exclude": [
+    "**/__pycache__",
+    "tmp*"
+  ]
+}

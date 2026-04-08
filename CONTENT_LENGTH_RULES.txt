@@ -1,0 +1,110 @@
+# 📏 CONTENT_LENGTH_RULES — Structured Specification
+
+## 1. Purpose
+
+Defines how the system controls the size and density of generated content.
+
+Ensures that articles match the expected depth, readability, and format requirements for each task. 
+
+---
+
+## 2. Inputs
+
+Content length is determined based on:
+
+* task parameters from Excel
+* system-level constraints
+
+---
+
+## 3. What Is Regulated
+
+The system controls:
+
+* total article length
+* paragraph size
+* text density (amount of information per section)
+
+---
+
+## 4. Key Principles
+
+* Length is **NOT globally fixed**
+* Length is **context-dependent**
+* Length may vary based on:
+
+  * task configuration
+  * selected style
+  * content complexity
+* Rules are applied dynamically via prompt construction
+
+---
+
+## 5. How It Works in the System
+
+### Resolution Flow
+
+```
+task → length parameter → prompt rules → generation → post-processing normalization
+```
+
+* Length is embedded into the prompt during generation
+* Post-processing may adjust formatting to match expected density
+
+---
+
+## 6. Where It Is Used
+
+* Prompt construction (generation phase)
+* Post-processing module (final formatting and normalization)
+
+---
+
+## 7. Relationship with Other Modules
+
+Content length is tightly integrated with:
+
+* `ARTICLE_STRUCTURE_TEMPLATES.txt` (defines how content is distributed across sections)
+* `TONE_OF_VOICE_RULES.txt` (affects sentence length and complexity)
+* `HEADING_RULES.txt` (affects structure and segmentation)
+* `HTML_FORMATTING_RULES.txt` (final rendering)
+* `SYSTEM_INSTRUCTIONS.txt` (global constraints)
+
+---
+
+## 8. System Behavior
+
+The system:
+
+* adapts content size to the task
+* balances depth vs readability
+* ensures:
+
+  * no overly short content when depth is required
+  * no unnecessary verbosity
+* keeps consistency between sections (no uneven density)
+
+---
+
+## 9. Output
+
+The LLM produces:
+
+* content with appropriate length
+* balanced paragraph distribution
+* consistent density across the article
+
+---
+
+## 10. Key Insight (Core Rule)
+
+```
+Content length is dynamic and controlled through prompt logic, not fixed limits.
+```
+
+---
+
+## 11. Summary (One Line)
+
+The system dynamically adjusts article length and density using prompt-driven rules and post-processing to match task requirements.
+

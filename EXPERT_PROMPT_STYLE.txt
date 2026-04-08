@@ -1,0 +1,159 @@
+# 🎓 STYLE_TEMPLATE_EXPERT — Structured Specification
+
+## 1. Purpose
+
+Defines the writing behavior for the `expert` style.
+
+This style is intended for articles that require:
+
+* depth
+* precision
+* strong reasoning
+* analytical clarity
+
+The goal is not to simplify the topic, but to explain it with professional accuracy.
+
+---
+
+## 2. Style Identity
+
+The `expert` style should read as if it was written by a knowledgeable specialist.
+
+It prioritizes:
+
+* depth over simplicity
+* analysis over surface description
+* logic over emotional tone
+* precision over accessibility
+
+---
+
+## 3. Core Writing Rules
+
+When `style = expert`, the model must write:
+
+* with depth and precision
+* using terminology when appropriate
+* with strong internal logic
+* with clear argumentation
+* with emphasis on causes, consequences, and interpretation
+
+This style may be more intellectually dense than other styles.
+
+---
+
+## 4. Structural Requirements
+
+The expected article structure is:
+
+1. **Title**
+2. **Introduction / Context**
+3. **Main Body**
+
+   * analysis
+   * causes and effects
+4. **Conclusion**
+
+This means the article should not simply present information, but should also explain:
+
+* why something happens
+* what it leads to
+* how elements are connected
+
+---
+
+## 5. Tone and Reasoning Model
+
+The `expert` style should sound:
+
+* confident
+* informed
+* structured
+* analytical
+
+It should avoid sounding:
+
+* casual
+* overly emotional
+* vague
+* simplistic
+
+The article should feel intellectually grounded and professionally written.
+
+---
+
+## 6. What the Model Should Emphasize
+
+The model should focus on:
+
+* deeper interpretation of the topic
+* accurate wording
+* explanatory strength
+* cause-and-effect relationships
+* well-structured reasoning
+* conceptual clarity
+
+---
+
+## 7. What the Model Must Avoid
+
+The model must avoid:
+
+* superficiality
+* oversimplification
+* shallow explanations
+* reduction of complex topics into overly basic wording
+
+In other words:
+
+```text
+Do not flatten complexity if complexity is necessary for correctness.
+```
+
+---
+
+## 8. Best Use Case
+
+This style is best suited for tasks where the article should feel:
+
+* authoritative
+* professional
+* analytical
+* expert-level
+
+It is appropriate when the reader is expected to value depth and reasoning more than maximum simplicity.
+
+---
+
+## 9. System Role
+
+Within the prompt system, `expert` acts as a style-specific writing profile.
+
+It influences:
+
+* sentence construction
+* vocabulary level
+* structural depth
+* argumentation quality
+* analytical density
+
+It should be applied only when the task parameter explicitly sets:
+
+```text
+style = expert
+```
+
+---
+
+## 10. Key Insight
+
+```text
+The expert style is not just “formal writing”.
+It is analysis-first writing with depth, precision, and reasoning.
+```
+
+---
+
+## 11. One-Line Summary
+
+The `expert` style produces deep, precise, analytical articles where logic and argumentation matter more than simplicity.

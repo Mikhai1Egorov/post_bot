@@ -1,0 +1,207 @@
+# 📦 LENGTH_BLOCKS & OPTIONAL_BLOCKS — Structured Specification
+
+---
+
+## 1. Purpose
+
+Defines:
+
+* content length profiles
+* optional content blocks
+* how these parameters are injected into the final prompt
+
+This module controls **content depth**, **structure expansion**, and **conditional elements**.
+
+---
+
+## 2. Length Profiles
+
+### 2.1 `short`
+
+Characteristics:
+
+* minimal length
+* only core information
+* no unnecessary details
+* minimal number of paragraphs
+
+Behavior:
+
+* compress content to essentials
+* avoid explanations unless critical
+* prioritize speed of reading
+
+---
+
+### 2.2 `medium`
+
+Characteristics:
+
+* balanced article
+* sufficient detail to explain the topic
+* no overload of information
+
+Behavior:
+
+* include key explanations
+* maintain readability
+* moderate paragraph count
+
+---
+
+### 2.3 `long`
+
+Characteristics:
+
+* deep topic coverage
+* detailed explanations
+* extended structure allowed
+
+Behavior:
+
+* include analysis and context
+* expand sections logically
+* allow more subsections (`h2`, `h3`)
+
+---
+
+## 3. Key Principles
+
+* Length is **context-driven**, not fixed
+* Length affects:
+
+  * structure depth
+  * number of sections
+  * paragraph size
+* Length must align with:
+
+  * `style`
+  * task complexity
+
+---
+
+## 4. Optional Blocks Logic
+
+### 4.1 Image Block
+
+Excel input contract:
+
+```text
+include_image = TRUE | FALSE
+```
+
+Behavior:
+
+* `1/0` input is invalid
+* normalize Excel value to internal boolean flag
+* insert a logical placeholder inside the article
+* choose a natural position (usually after intro or between sections)
+* DO NOT generate the image itself
+
+Render condition (internal):
+
+```text
+include_image = true
+```
+
+If internal flag is:
+
+```text
+include_image = false
+```
+
+* no image block is added
+
+---
+
+### 4.2 Footer Block
+
+Condition:
+
+```text
+footer_text + footer_link provided
+```
+
+Behavior:
+
+* append footer at the end of the article
+
+If:
+
+* only `footer_text` → render text only
+* both provided → render clickable link
+
+If not provided:
+
+* footer is NOT added
+
+---
+
+## 5. How It Works in the System
+
+### Prompt Construction Flow
+
+```text
+FINAL PROMPT =
+SYSTEM_INSTRUCTIONS
++ STYLE_TEMPLATE (journalistic / simple / expert)
++ MASTER_PROMPT_TEMPLATE
++ TASK_DATA
++ CONTENT_LENGTH_RULES (short / medium / long)
++ OPTIONAL BLOCKS (image / footer)
+```
+
+---
+
+## 6. System Behavior
+
+The system dynamically:
+
+* selects length profile
+* adjusts article depth
+* injects conditional blocks
+* ensures consistency with:
+
+  * structure templates
+  * heading rules
+  * HTML formatting
+
+---
+
+## 7. Relationship with Other Modules
+
+This module integrates with:
+
+* `CONTENT_LENGTH_RULES.txt` — general constraints
+* `ARTICLE_STRUCTURE_TEMPLATES.txt` — structure depth
+* `HEADING_RULES.txt` — section expansion
+* `HTML_FORMATTING_RULES.txt` — final rendering
+* `JOURNALIST_PROMPT_STYLE.txt` — style profile (`journalistic`)
+* `SIMPLE_PROMPT_STYLE.txt` — style profile (`simple`)
+* `EXPERT_PROMPT_STYLE.txt` — style profile (`expert`)
+
+---
+
+## 8. Output Requirements
+
+Final article must:
+
+* match selected length profile
+* include or exclude optional blocks correctly
+* remain logically structured
+* be ready for HTML conversion
+
+---
+
+## 9. Key Insight (Core Rule)
+
+```text
+Length controls depth, not just size.
+Optional blocks control structure, not content.
+```
+
+---
+
+## 10. One-Line Summary
+
+The system dynamically adjusts article depth and structure using length profiles and conditional blocks, which are injected into the final prompt.

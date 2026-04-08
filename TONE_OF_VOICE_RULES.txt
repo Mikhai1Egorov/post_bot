@@ -1,0 +1,113 @@
+# 🎭 TONE_OF_VOICE_RULES — Structured Specification
+
+## 1. Purpose
+
+Defines how the text “sounds” — i.e., the tone of voice applied during content generation.
+
+This module controls stylistic expression at a deeper level than structure, ensuring that the article matches the intended communication style.
+
+---
+
+## 2. Input
+
+* `style` (from Excel, validated)
+
+---
+
+## 3. Core Logic
+
+### Resolution Flow
+
+```text id="l2w9b8"
+style → select tone profile → apply to prompt
+```
+
+Tone is derived automatically and is NOT directly specified by the user.
+
+---
+
+## 4. Key Principles
+
+* Tone is **fully dependent on `style`**
+* Tone is **not configurable independently**
+* Each `style` has a predefined tone profile
+* Tone profiles are stored inside the project
+
+---
+
+## 5. What Is Controlled
+
+Tone of voice affects:
+
+* level of formality
+* emotional intensity
+* sentence length and rhythm
+* degree of subjectivity
+* clarity vs expressiveness
+
+---
+
+## 6. System Behavior
+
+The system:
+
+* reads `style`
+* selects corresponding tone profile
+* injects tone rules into prompt-template
+* ensures consistency throughout the article
+
+---
+
+## 7. Where It Is Used
+
+* inside `prompt-template`
+* during prompt construction (Prompt Resolver stage)
+
+---
+
+## 8. Relationship with Styles
+
+Each style maps to a specific tone profile:
+
+* `journalistic` → neutral, factual, concise
+* `simple` → clear, accessible, minimal complexity
+* `expert` → analytical, precise, structured
+
+Tone is a **derived layer**, not a separate configuration.
+
+---
+
+## 9. Relationship with Other Modules
+
+Tone integrates with:
+
+* `JOURNALIST_PROMPT_STYLE.txt` — tone profile (`journalistic`)
+* `SIMPLE_PROMPT_STYLE.txt` — tone profile (`simple`)
+* `EXPERT_PROMPT_STYLE.txt` — tone profile (`expert`)
+* `CONTENT_LENGTH_RULES.txt` — affects sentence density
+* `ARTICLE_STRUCTURE_TEMPLATES.txt` — affects section depth
+* `SYSTEM_INSTRUCTIONS.txt` — enforces global constraints
+
+---
+
+## 10. Output Requirements
+
+Generated text must:
+
+* sound consistent with selected style
+* maintain tone across all sections
+* avoid tone shifts within the same article
+
+---
+
+## 11. Key Insight (Core Rule)
+
+```text id="jz4r2n"
+Tone is not chosen — it is derived from style.
+```
+
+---
+
+## 12. One-Line Summary
+
+The system automatically derives tone of voice from the selected style and applies it consistently through the prompt.

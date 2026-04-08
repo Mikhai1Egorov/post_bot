@@ -1,0 +1,173 @@
+﻿from __future__ import annotations
+
+import sys
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from post_bot.infrastructure.runtime.maintenance_runtime import MaintenanceRuntimeResult  # noqa: E402
+from post_bot.infrastructure.runtime.telegram_runtime import TelegramRuntimeResult  # noqa: E402
+from post_bot.infrastructure.runtime.worker_runtime import WorkerRuntimeResult  # noqa: E402
+from post_bot.shared.config import AppConfig  # noqa: E402
+from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
+
+
+def _config() -> AppConfig:
+    return AppConfig(
+        env="test",
+        log_level="INFO",
+        database_dsn="mysql://user:pass@localhost:3306/postbot",
+        worker_count=1,
+        default_interface_language=InterfaceLanguage.EN,
+        research_api_url=None,
+        llm_api_url=None,
+        publisher_api_url=None,
+        outbound_api_token=None,
+        outbound_timeout_seconds=15.0,
+        telegram_bot_token="token-123",
+        telegram_poll_timeout_seconds=30,
+    )
+
+
+class _FakeWorkerRuntime:
+    def __init__(self) -> None:
+        self.last_command = None
+
+    def run(self, command):  # noqa: ANN001
+        self.last_command = command
+        return WorkerRuntimeResult(cycles_executed=2, tasks_processed=1, failed_cycles=0)
+
+
+class _FakeMaintenanceRuntime:
+    def __init__(self) -> None:
+        self.last_command = None
+
+    def run(self, command):  # noqa: ANN001
+        self.last_command = command
+        return MaintenanceRuntimeResult(iterations_executed=1, recovered_total=0, cleanup_deleted_total=0)
+
+
+class _FakeTelegramRuntime:
+    def __init__(self) -> None:
+        self.last_command = None
+
+    def run(self, command):  # noqa: ANN001
+        self.last_command = command
+        return TelegramRuntimeResult(cycles_executed=1, updates_processed=3, updates_failed=0, next_offset=11)
+
+
+class RuntimeEntrypointsTests(unittest.TestCase):
+    def test_worker_entrypoint_parses_args_and_runs_runtime(self) -> None:
+        from post_bot.infrastructure.runtime import worker_entrypoint
+
+        fake_runtime = _FakeWorkerRuntime()
+
+        with (
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.AppConfig.from_env", return_value=_config()),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.configure_logging"),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.build_default_runtime_wiring", return_value=object()),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.build_worker_runtime", return_value=fake_runtime),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "post-bot-worker",
+                    "--worker-id",
+                    "w-1",
+                    "--model-name",
+                    "gpt-test",
+                    "--max-cycles",
+                    "5",
+                    "--idle-sleep",
+                    "0.2",
+                ],
+            ),
+        ):
+            exit_code = worker_entrypoint.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNotNone(fake_runtime.last_command)
+        self.assertEqual(fake_runtime.last_command.worker_id, "w-1")
+        self.assertEqual(fake_runtime.last_command.model_name, "gpt-test")
+        self.assertEqual(fake_runtime.last_command.max_cycles, 5)
+        self.assertEqual(fake_runtime.last_command.idle_sleep_seconds, 0.2)
+
+    def test_maintenance_entrypoint_parses_ids_and_runs_runtime(self) -> None:
+        from post_bot.infrastructure.runtime import maintenance_entrypoint
+
+        fake_runtime = _FakeMaintenanceRuntime()
+
+        with (
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.AppConfig.from_env", return_value=_config()),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.configure_logging"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_default_runtime_wiring", return_value=object()),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_maintenance_runtime", return_value=fake_runtime),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "post-bot-maintenance",
+                    "--iterations",
+                    "3",
+                    "--interval-seconds",
+                    "1.5",
+                    "--stale-task-ids",
+                    "11,22,33",
+                    "--recover-reason",
+                    "MANUAL_RECOVERY",
+                    "--cleanup",
+                    "--cleanup-dry-run",
+                ],
+            ),
+        ):
+            exit_code = maintenance_entrypoint.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNotNone(fake_runtime.last_command)
+        self.assertEqual(fake_runtime.last_command.iterations, 3)
+        self.assertEqual(fake_runtime.last_command.interval_seconds, 1.5)
+        self.assertEqual(fake_runtime.last_command.stale_task_ids, (11, 22, 33))
+        self.assertEqual(fake_runtime.last_command.recover_reason_code, "MANUAL_RECOVERY")
+        self.assertTrue(fake_runtime.last_command.cleanup_non_final_artifacts)
+        self.assertTrue(fake_runtime.last_command.cleanup_dry_run)
+
+    def test_bot_entrypoint_parses_args_and_runs_runtime(self) -> None:
+        from post_bot.infrastructure.runtime import bot_entrypoint
+
+        fake_runtime = _FakeTelegramRuntime()
+
+        with (
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.AppConfig.from_env", return_value=_config()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.configure_logging"),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring", return_value=type("W", (), {"uow": object()})()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramHttpGateway", return_value=object()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.GetUserContextUseCase", return_value=object()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramPollingRuntime", return_value=fake_runtime),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "post-bot-telegram",
+                    "--max-cycles",
+                    "4",
+                    "--offset",
+                    "101",
+                    "--idle-sleep",
+                    "0.1",
+                ],
+            ),
+        ):
+            exit_code = bot_entrypoint.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNotNone(fake_runtime.last_command)
+        self.assertEqual(fake_runtime.last_command.max_cycles, 4)
+        self.assertEqual(fake_runtime.last_command.offset, 101)
+        self.assertEqual(fake_runtime.last_command.idle_sleep_seconds, 0.1)
+        self.assertEqual(fake_runtime.last_command.poll_timeout_seconds, 30)
+
+
+if __name__ == "__main__":
+    unittest.main()

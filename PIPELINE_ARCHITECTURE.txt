@@ -1,0 +1,467 @@
+# 🏗 PIPELINE_ARCHITECTURE — Structured Specification
+
+## 1. Purpose
+
+Defines the internal processing pipeline after a user uploads an Excel file.
+
+This architecture ensures:
+
+* deterministic processing
+* strict validation before execution
+* modular and isolated stages
+* full traceability via database
+
+---
+
+## 2. High-Level Flow
+
+```text
+Telegram Bot -> Validation -> Billing -> Task Creation -> Orchestrator
+-> Preparation -> Research -> Prompt Resolver -> Generation -> Post-Processing
+→ (instant | approval) → DONE
+```
+
+---
+
+## 3. Stage-by-Stage Pipeline
+
+---
+
+## 3.1 Upload Intake
+
+### Input
+
+* Excel file from Telegram bot
+
+### System Actions
+
+* receive file
+* store file in storage
+* create `uploads` record
+* assign:
+
+  * `user_id`
+  * file metadata
+  * language
+* set status:
+
+```text
+RECEIVED
+```
+
+---
+
+## 3.2 Validation Module
+
+### Responsibility
+
+Validate Excel BEFORE any processing.
+
+### What Is Checked
+
+* required fields (`channel`, `topic`, etc.)
+* enum values (`mode`, `style`, languages)
+* `include_image` format: ONLY `TRUE` / `FALSE` in Excel input
+* `schedule_at` format: canonical `YYYY-MM-DD HH:MM` OR native Excel datetime serial (must be parsed and normalized)
+* row-level correctness
+* duplicates
+* logical conflicts
+
+---
+
+### Outcomes
+
+#### ❌ Validation Failed
+
+* status: `VALIDATION_FAILED`
+* errors stored in DB
+* pipeline STOPPED
+
+---
+
+#### ✅ Validation Passed
+
+* status: `VALIDATED`
+* compute:
+
+```text
+required_articles_count = valid_rows_count
+```
+
+---
+
+#### ❌ Balance Insufficient
+
+* `billing_status = REJECTED`
+* tasks NOT created
+* pipeline STOPPED
+
+---
+
+#### ✅ Balance OK
+
+* execute `RESERVE`
+* proceed to task creation
+
+---
+
+## 3.3 Task Creation
+
+Each Excel row → one task.
+
+### Stored Data
+
+* `target_channel` (from Excel `channel`)
+* `topic_text` (from Excel `topic`)
+* `custom_title` (from Excel `title`)
+* `style_code` (from Excel `style`)
+* `publish_mode` (from Excel `mode`)
+* `response_language_code` / `source_language_code`
+* `content_length_code`, `include_image_flag`, `footer_text`, `footer_link_url`, `scheduled_publish_at`
+
+### Initial Status
+
+```text
+CREATED
+```
+
+---
+
+## 3.4 Task Orchestrator
+
+### Responsibility
+
+Central control of pipeline execution.
+
+### Actions
+
+* fetch tasks
+* queue them
+* route between modules
+* update statuses
+
+### Status Flow
+
+```text
+CREATED → QUEUED → PREPARING → RESEARCHING → GENERATING → RENDERING
+→ READY_FOR_APPROVAL / PUBLISHING → DONE
+```
+
+---
+
+## 3.5 Preparation Module
+
+### Responsibility
+
+Build internal task payload.
+
+### Actions
+
+* read task config
+* resolve:
+
+  * `style`
+  * `response_language`
+  * `publish_mode`
+* apply defaults
+* select templates
+* prepare prompt variables
+
+---
+
+## 3.6 Prompt Resolver
+
+### Responsibility
+
+Select correct prompt-template.
+
+### Logic
+
+```text
+style → prompt-template
+```
+
+### Inputs
+
+* style
+* system instructions
+* tone rules
+* structure templates
+* length rules
+
+### Output
+
+* FINAL PROMPT
+
+Runtime order: Preparation -> Research -> Prompt Resolver -> Generation
+
+---
+
+## 3.7 Research Module
+
+### Responsibility
+
+Collect external context (if needed).
+
+### Actions
+
+* find relevant sources
+* filter noise
+* normalize data
+* build research context
+
+### Status
+
+```text
+RESEARCHING
+```
+
+---
+
+## 3.8 Content Generation Module
+
+### Responsibility
+
+Generate article via ChatGPT.
+
+### Actions
+
+* send FINAL PROMPT
+* include research context
+* receive raw output
+* store:
+
+  * prompt
+  * model
+  * raw text
+  * status
+
+### Status
+
+```text
+GENERATING
+```
+
+---
+
+## 3.9 Post-Processing Module
+
+### Responsibility
+
+Transform raw text into final output.
+
+### Actions
+
+* clean artifacts
+* enforce structure
+* validate headings
+* convert to HTML
+* inject:
+
+  * image block (if needed)
+  * footer (if needed)
+
+### Outputs
+
+* `body_html`
+* `preview_text`
+* `slug`
+
+### Status
+
+```text
+RENDERING
+```
+
+---
+
+## 4. Mode Branching
+
+---
+
+## 4.1 MODE = instant
+
+### Behavior
+
+* auto publish without user interaction
+
+### Flow
+
+```text
+RENDERING → PUBLISHING → DONE
+```
+
+### Modules
+
+* Publisher
+* Telegram Adapter
+
+---
+
+## 4.2 MODE = approval
+
+### Behavior
+
+* wait for user action
+
+### Flow
+
+```text
+RENDERING → READY_FOR_APPROVAL
+```
+
+System:
+
+* builds ZIP archive
+* sends notification
+
+User actions:
+
+* Publish → publish content
+* Download → return archive
+
+Both lead to:
+
+```text
+DONE
+```
+
+---
+
+## 5. Completion States
+
+Final statuses:
+
+* `DONE`
+* `FAILED`
+* `CANCELLED`
+
+Additional metadata:
+
+* error message
+* retry count
+* timestamps
+
+Retry rule:
+* retryable external failures can move the task back to `QUEUED`
+* worker claim atomically moves `QUEUED -> PREPARING` before execution (duplicate-pick protection)
+* after max attempts the task remains `FAILED`
+
+---
+
+## 6. Cleanup Processes
+
+Background jobs:
+
+* remove temp files
+* delete old ZIP archives
+* clean intermediate artifacts
+* recover stale tasks by explicit stale task ids only
+* status-only mass recovery is disabled by default (fail-safe)
+
+Preserved:
+
+* final outputs
+* ledger data
+* publication history
+
+---
+
+## 7. Role of Database
+
+### Core Principle
+
+```text
+DB = single source of truth
+```
+
+### Stores
+
+* users
+* uploads
+* tasks
+* statuses
+* errors
+* prompts
+* generation results
+* artifacts
+* publications
+
+### Guarantees
+
+* recovery after restart
+* full audit trail
+* state consistency
+
+---
+
+## 8. End-to-End Flow (Compact)
+
+```text
+Upload Excel
+→ Validate
+→ if invalid → stop
+
+→ Check balance
+→ if insufficient → stop
+
+→ RESERVE
+→ Create tasks
+→ Orchestrate
+
+-> Prepare
+-> Research
+-> Resolve prompt
+-> Generate
+→ Post-process
+
+→ mode:
+   instant → publish
+   approval → user decision
+
+→ DONE
+```
+
+---
+
+## 9. Simplified Flow (Action Chain)
+
+```text
+Receive → Validate → Reserve → Create → Orchestrate
+-> Prepare -> Research -> Resolve -> Generate -> Render
+→ Publish / Archive → Complete
+```
+
+---
+
+## 10. Key Insight
+
+```text
+Pipeline is strictly sequential, state-driven, and DB-backed.
+No stage executes without the previous one being completed.
+```
+
+---
+
+## 11. One-Line Summary
+
+The system processes Excel tasks through a strict, modular pipeline where validation, billing, generation, and publishing are fully isolated and state-controlled.
+
+
+## 12. External Adapter Contracts
+
+Runtime can use HTTP adapters for research, LLM generation, and publishing.
+
+Config keys:
+* `RESEARCH_API_URL`
+* `LLM_API_URL`
+* `PUBLISHER_API_URL`
+* `OUTBOUND_API_TOKEN`
+* `OUTBOUND_TIMEOUT_SECONDS`
+
+Contract summary:
+* research response requires `sources` list
+* llm response requires non-empty `text`
+* publish response may include `external_message_id` and `payload`
+
+If URL is not configured for a module, runtime returns explicit not-configured failure (no implicit fallback).

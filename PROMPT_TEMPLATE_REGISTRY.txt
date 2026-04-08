@@ -1,0 +1,131 @@
+# 📁 PROMPT_TEMPLATE_REGISTRY — Structured Specification
+
+## 1. Purpose
+
+Defines the mapping between the `style` field (from Excel) and the corresponding prompt template used by the system.
+
+This module ensures that each task is generated using the correct prompt logic based on its style.
+
+---
+
+## 2. Input
+
+* `style` (string from Excel, validated)
+
+---
+
+## 3. Supported Styles (Strict Set)
+
+```text
+journalistic
+simple
+expert
+```
+
+### Rules
+
+* Only predefined styles are allowed
+* Values must pass:
+
+  * Excel validation
+  * database constraints
+* Any unknown value is rejected BEFORE generation
+
+---
+
+## 4. Resolution Logic
+
+### Core Flow
+
+```text
+style → find prompt-template → if found → use → else → error
+```
+
+### Behavior
+
+1. Read `style` from task
+2. Look up corresponding prompt-template
+3. If found:
+
+   * inject into prompt system
+4. If not found:
+
+   * fail the task
+
+---
+
+## 5. Error Handling
+
+If no matching template is found:
+
+* task status → `FAILED`
+* error written to DB:
+
+```text
+PROMPT_TEMPLATE_NOT_FOUND
+```
+
+This is a **hard failure**, not recoverable at runtime.
+
+---
+
+## 6. Where It Is Used
+
+* Module: `Prompt Resolver`
+* Executed AFTER:
+
+  * validation
+  * preparation
+  * research context collection
+* Executed BEFORE:
+
+  * generation
+
+---
+
+## 7. System Behavior
+
+The system guarantees:
+
+* deterministic prompt selection
+* no fallback to default styles
+* strict mapping between style and template
+* full validation before generation
+
+---
+
+## 8. Relationship with Other Modules
+
+This module integrates with:
+
+* `SYSTEM_INSTRUCTIONS.txt` — global rules
+* `JOURNALIST_PROMPT_STYLE.txt` — style-specific logic (`journalistic`)
+* `SIMPLE_PROMPT_STYLE.txt` — style-specific logic (`simple`)
+* `EXPERT_PROMPT_STYLE.txt` — style-specific logic (`expert`)
+* `MASTER_PROMPT_TEMPLATE.txt` — base content layer
+* `CONTENT_LENGTH_RULES.txt` — length constraints
+* `LENGTH-BLOCKS.txt` — optional blocks logic
+* `ARTICLE_STRUCTURE_TEMPLATES.txt` — structure logic
+* `HTML_FORMATTING_RULES.txt` — output format
+
+---
+
+## 9. Output
+
+* selected prompt-template
+* injected into FINAL PROMPT
+
+---
+
+## 10. Key Insight (Core Rule)
+
+```text
+Style does not influence generation directly.
+It selects the prompt that defines generation.
+```
+
+---
+
+## 11. One-Line Summary
+
+The system maps validated `style` values to strict prompt templates, ensuring deterministic and controlled content generation.

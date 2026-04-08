@@ -1,0 +1,143 @@
+# 🧾 HTML_FORMATTING_RULES — Structured Specification
+
+## 1. Purpose
+
+Defines how generated content is transformed into a standardized HTML format.
+
+The goal is to ensure:
+
+* consistent rendering
+* valid HTML structure
+* clean and readable output
+* compatibility with publishing systems
+
+---
+
+## 2. What Is Regulated
+
+The system controls:
+
+* HTML tags:
+
+  * `h1`, `h2`, `h3`
+  * `p`
+  * `ul`, `ol`, `li`
+* overall document structure
+* spacing and indentation
+* list formatting
+* semantic correctness of markup
+
+---
+
+## 3. Key Principles
+
+* Output must be **valid HTML**
+* Structure must be **consistent across all articles**
+* Tags must be **semantically correct**
+* Formatting must be **clean and normalized**
+* No raw/unstructured text should reach final output
+
+---
+
+## 4. HTML Structure Model
+
+### Core Elements
+
+```html id="z4m7kp"
+<h1>Title</h1>
+<p>Introduction</p>
+
+<h2>Section</h2>
+<p>Content</p>
+
+<ul>
+  <li>Item</li>
+</ul>
+```
+
+### Rules
+
+* One `h1` per document
+* Use `h2` for main sections
+* Use `h3` for nested sections (optional)
+* Paragraphs must be wrapped in `<p>`
+* Lists must use `<ul>/<ol>` and `<li>`
+
+---
+
+## 5. How It Works in the System
+
+### Stage — Post-Processing Module
+
+The module performs:
+
+1. **Text → HTML transformation**
+2. **Tag validation**
+3. **Structure normalization**
+4. **Formatting cleanup**
+
+---
+
+## 6. Where It Is Used
+
+* Module: `Post-Processing`
+* Applied AFTER content generation
+* Applied BEFORE:
+
+  * publication
+  * archive creation
+  * delivery to user
+
+---
+
+## 7. System Behavior
+
+The system automatically:
+
+* converts raw text into structured HTML
+* inserts missing tags where required
+* fixes broken or invalid HTML
+* ensures consistent indentation and spacing
+* normalizes lists and paragraphs
+* aligns output with the canonical HTML template
+
+---
+
+## 8. Relationship with Other Modules
+
+HTML formatting depends on:
+
+* `ARTICLE_STRUCTURE_TEMPLATES.txt` → defines logical sections
+* `HEADING_RULES.txt` → defines heading hierarchy
+* `CONTENT_LENGTH_RULES.txt` → affects paragraph size
+* `TONE_OF_VOICE_RULES.txt` → influences content style
+* `SYSTEM_INSTRUCTIONS.txt` → global constraints
+
+---
+
+## 9. Output Requirements
+
+Final output MUST be:
+
+* a fully structured HTML document or fragment
+* semantically correct
+* clean and readable
+* ready for:
+
+  * publishing
+  * export (ZIP / archive)
+  * preview rendering
+
+---
+
+## 10. Key Insight (Core Rule)
+
+```html id="qv1z2c"
+HTML formatting is not styling — it is structural normalization of generated content.
+```
+
+---
+
+## 11. One-Line Summary
+
+The system converts generated text into clean, valid, and standardized HTML using post-processing rules to ensure consistency and readiness for publication.

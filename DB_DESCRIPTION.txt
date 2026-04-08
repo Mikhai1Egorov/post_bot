@@ -1,0 +1,453 @@
+# 💰 BILLING & DATABASE MODEL — Structured Specification (Variant B)
+
+---
+
+## 1. Purpose
+
+Defines:
+
+* billing logic for article consumption
+* database schema
+* interaction between billing and pipeline
+
+Core principle:
+
+```
+Articles are charged ONLY after validation and actual processing start.
+```
+
+---
+
+## 2. Billing Model (Core Logic)
+
+### Flow
+
+```
+PURCHASE → RESERVE → CONSUME
+```
+
+### Rules
+
+* No charge on upload
+* No charge on validation failure
+* Balance accumulates across purchases
+* Pipeline starts ONLY after successful RESERVE
+
+---
+
+## 3. Billing Lifecycle
+
+### Step 1 — PURCHASE
+
+User buys a package:
+
+* `14`, `42`, `84` articles
+* Balance increases
+
+Ledger:
+
+```
+PURCHASE +N
+```
+
+---
+
+### Step 2 — VALIDATION
+
+* Excel is validated
+* Count `valid_rows_count`
+
+If invalid:
+
+* pipeline stops
+* no billing actions
+
+---
+
+### Step 3 — RESERVE
+
+If balance is sufficient:
+
+* reserve required articles
+* mark upload as accepted
+
+Ledger:
+
+```
+RESERVE -N
+```
+
+State updates:
+
+* `available_articles_count -= N`
+* `reserved_articles_count += N`
+
+---
+
+### Step 4 — CONSUME
+
+When pipeline actually starts:
+
+* reserved articles become consumed
+
+Ledger:
+
+```
+CONSUME (technical entry)
+```
+
+State updates:
+
+* `reserved_articles_count -= N`
+* `consumed_articles_total += N`
+
+---
+
+### Step 5 — RELEASE (Optional)
+
+If cancelled before processing:
+
+```
+RELEASE +N
+```
+
+---
+
+## 4. Key Rule (Critical)
+
+```
+Charging happens in TWO steps:
+RESERVE → CONSUME
+NOT on upload and NOT on purchase.
+```
+
+---
+
+## 5. Database Design Overview
+
+### Core Principle
+
+```
+Ledger = source of truth
+Balances = derived state
+```
+
+---
+
+## 6. Main Tables
+
+### 6.1 Users
+
+Stores bot users.
+
+Fields:
+
+* `id`
+* `telegram_user_id`
+* `interface_language`
+* timestamps
+
+---
+
+### 6.2 Article Packages
+
+Defines purchasable plans.
+
+Examples:
+
+* `ARTICLES_14`
+* `ARTICLES_42`
+* `ARTICLES_84`
+
+---
+
+### 6.3 Payments
+
+Stores purchase transactions.
+
+Key fields:
+
+* `user_id`
+* `package_id`
+* `payment_status`
+* `purchased_articles_qty`
+
+---
+
+### 6.4 User Article Balances
+
+Aggregated balance snapshot.
+
+Fields:
+
+* `available_articles_count`
+* `reserved_articles_count`
+* `consumed_articles_total`
+
+Purpose:
+
+* fast reads
+* derived from ledger
+
+---
+
+### 6.5 Article Balance Ledger (SOURCE OF TRUTH)
+
+Tracks all balance changes.
+
+Entry types:
+
+```
+PURCHASE
+RESERVE
+RELEASE
+CONSUME
+REFUND
+MANUAL_ADJUSTMENT
+CORRECTION
+```
+
+Examples:
+
+* purchase → `+84`
+* reserve → `-10`
+* release → `+10`
+
+---
+
+### 6.6 Uploads
+
+Represents one Excel file.
+
+Key responsibilities:
+
+* validation state
+* billing state
+* article requirements
+
+Billing fields:
+
+* `required_articles_count`
+* `reserved_articles_count`
+* `billing_status`
+
+---
+
+### 6.7 Upload Validation Errors
+
+Stores validation issues.
+
+Used to:
+
+* block pipeline
+* return detailed feedback to user
+
+---
+
+### 6.8 Tasks
+
+Each Excel row = one task.
+
+Includes:
+
+* content parameters (topic, style, language)
+* publishing settings
+* billing state per task
+
+Billing:
+
+* `article_cost = 1`
+* `billing_state = RESERVED | CONSUMED | RELEASED`
+
+---
+
+### 6.9 Task Status History
+
+Tracks task lifecycle transitions.
+
+---
+
+### 6.10 Research Sources
+
+Stores collected sources for generation.
+
+---
+
+### 6.11 Task Generations
+
+Stores LLM generation attempts:
+
+* prompt version
+* model
+* raw output
+* status
+
+---
+
+### 6.12 Task Renders
+
+Final processed result:
+
+* HTML content
+* metadata
+* preview
+
+---
+
+### 6.13 Task Artifacts
+
+Stores files:
+
+* XLSX
+* HTML
+* ZIP
+* preview
+
+---
+
+### 6.14 Approval Batches
+
+Groups tasks for approval mode.
+
+---
+
+### 6.15 Approval Batch Items
+
+Links tasks to batch.
+
+---
+
+### 6.16 Publications
+
+Stores publishing results:
+
+* channel
+* publish mode
+* status
+
+---
+
+### 6.17 User Actions
+
+Tracks user interactions:
+
+* upload
+* publish click
+* download archive
+
+---
+
+## 7. End-to-End Flow
+
+```
+1. Upload Excel → status: RECEIVED
+
+2. Validation:
+   - if failed → stop
+   - if success → calculate valid_rows_count
+
+3. Billing Check:
+   - if insufficient → REJECTED
+   - if sufficient → RESERVE
+
+4. Create Tasks
+
+5. Start Processing:
+   → status: PROCESSING
+
+6. Convert RESERVE → CONSUME
+
+7. Pipeline:
+   research → generation → rendering
+
+8. Output:
+   - instant → auto publish
+   - approval → archive + user action
+```
+
+---
+
+## 8. Example Scenarios
+
+### Example 1
+
+* purchase: `+84`
+* reserve: `-10`
+
+State:
+
+* available_articles_count = 74
+* reserved_articles_count = 10
+
+After start:
+
+* reserved_articles_count = 0
+* consumed_articles_total = 10
+
+---
+
+### Example 2 (Multiple Purchases)
+
+```
++84 +42 +84 = 210 available
+```
+
+---
+
+### Example 3 (No Balance)
+
+* required_articles_count: 12
+* available_articles_count: 0
+
+Result:
+
+* `billing_status = REJECTED`
+* pipeline NOT started
+
+---
+
+## 9. Final Tables List
+
+```
+users
+article_packages
+payments
+user_article_balances
+article_balance_ledger
+uploads
+upload_validation_errors
+tasks
+task_status_history
+task_research_sources
+task_generations
+task_renders
+task_artifacts
+approval_batches
+approval_batch_items
+publications
+user_actions
+```
+
+---
+
+## 10. Source of Truth Rules
+
+* `article_balance_ledger` → balance truth
+* `user_article_balances` → cached aggregate
+* `uploads.billing_status` → upload billing state
+* `tasks.billing_state` → per-task billing state
+
+---
+
+## 11. Key Insight (Core Idea)
+
+```
+Billing is tightly coupled with validation and pipeline start,
+not with file upload or purchase itself.
+```
+
+---
+
+## 12. One-Line Summary
+
+The system uses a ledger-based billing model where articles are reserved after validation and consumed only when processing actually starts.

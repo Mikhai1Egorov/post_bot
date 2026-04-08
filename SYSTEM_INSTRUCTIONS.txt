@@ -1,0 +1,163 @@
+# 🧠 SYSTEM_INSTRUCTIONS — Structured Specification
+
+## 1. Purpose
+
+Defines global generation rules applied to ALL tasks, regardless of `style`.
+
+This module ensures:
+
+* consistent behavior of the LLM
+* unified quality standards
+* predictable output across all styles and tasks
+
+---
+
+## 2. Inputs
+
+* `response_language`
+* system-level project settings
+
+---
+
+## 3. What Is Controlled
+
+The system enforces:
+
+* response language
+* prohibition of AI-related phrasing
+* consistent quality level
+* text format requirements
+* baseline generation rules
+
+---
+
+## 4. Core Principle
+
+```text id="n2kq7m"
+FINAL PROMPT =
+SYSTEM_INSTRUCTIONS
++ STYLE_TEMPLATE
++ MASTER_PROMPT_TEMPLATE
++ TASK_DATA
++ CONTENT_LENGTH_RULES
++ OPTIONAL_BLOCKS
+```
+
+This means:
+
+* SYSTEM_INSTRUCTIONS define global constraints
+* STYLE_TEMPLATE + MASTER_PROMPT_TEMPLATE define style and content behavior
+* TASK_DATA provides task context
+* CONTENT_LENGTH_RULES + OPTIONAL_BLOCKS define depth and conditional blocks
+
+---
+
+## 5. Language Enforcement
+
+* output MUST be strictly in `response_language`
+* no mixing of languages
+* no fallback to default language
+
+---
+
+## 6. Global Writing Rules
+
+The model must always:
+
+* produce human-like text
+* maintain logical consistency
+* avoid repetition
+* ensure clarity and readability
+* avoid template-like phrasing
+
+---
+
+## 7. Prohibited Patterns
+
+The model must NOT:
+
+* mention AI, generation, or automation
+* explain how the text was generated
+* use meta phrases like:
+
+  * “in this article”
+  * “as an AI”
+  * “this text will cover”
+
+---
+
+## 8. Format Requirements
+
+The output must:
+
+* be clean and structured
+* be ready for HTML transformation
+* contain:
+
+  * headings
+  * paragraphs
+  * lists (if needed)
+* avoid unnecessary symbols or artifacts
+
+---
+
+## 9. Where It Is Used
+
+* injected into EVERY prompt sent to ChatGPT
+* applied BEFORE generation
+* combined with:
+
+  * style templates
+  * length rules
+  * task parameters
+
+---
+
+## 10. System Behavior
+
+The system guarantees:
+
+* consistent tone baseline across styles
+* stable formatting rules
+* predictable output structure
+* no deviation from core constraints
+
+---
+
+## 11. Relationship with Other Modules
+
+This module is the foundation for:
+
+* `PROMPT_TEMPLATE_REGISTRY.txt`
+* `JOURNALIST_PROMPT_STYLE.txt`
+* `SIMPLE_PROMPT_STYLE.txt`
+* `EXPERT_PROMPT_STYLE.txt`
+* `MASTER_PROMPT_TEMPLATE.txt`
+* `CONTENT_LENGTH_RULES.txt`
+* `ARTICLE_STRUCTURE_TEMPLATES.txt`
+* `HTML_FORMATTING_RULES.txt`
+
+It sits at the top of the prompt hierarchy.
+
+---
+
+## 12. Output
+
+* normalized, consistent text
+* compliant with all global rules
+* ready for post-processing
+
+---
+
+## 13. Key Insight
+
+```text id="w9qg3d"
+SYSTEM_INSTRUCTIONS define the rules of the system.
+Everything else operates within these constraints.
+```
+
+---
+
+## 14. One-Line Summary
+
+SYSTEM_INSTRUCTIONS enforce global generation rules, ensuring consistent, high-quality, and compliant output across all tasks.

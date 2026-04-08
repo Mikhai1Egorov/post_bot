@@ -1,0 +1,22 @@
+﻿[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "post-bot"
+version = "0.1.0"
+description = "Telegram Excel content pipeline"
+readme = "README_PIPELINE.txt"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+post-bot-worker = "post_bot.infrastructure.runtime.worker_entrypoint:main"
+post-bot-maintenance = "post_bot.infrastructure.runtime.maintenance_entrypoint:main"
+post-bot-telegram = "post_bot.infrastructure.runtime.bot_entrypoint:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
