@@ -29,6 +29,18 @@ from post_bot.pipeline.modules.research import ResearchModule  # noqa: E402
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
 
 
+class _FailingClaimUseCase:
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        raise RuntimeError("claim crashed")
+
+
+class _NoOpExecuteClaimedTaskUseCase:
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        raise AssertionError("execute_claimed_task should not be called")
+
+
 class RunWorkerCycleUseCaseTests(unittest.TestCase):
     def _resources(self) -> dict[str, str]:
         return {
@@ -163,7 +175,20 @@ class RunWorkerCycleUseCaseTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertIsNone(result.task_id)
 
+    def test_cycle_handles_unexpected_claim_exception(self) -> None:
+        cycle = RunWorkerCycleUseCase(
+            claim_next_task=_FailingClaimUseCase(),
+            execute_claimed_task=_NoOpExecuteClaimedTaskUseCase(),
+            logger=logging.getLogger("test.worker.cycle.exception"),
+        )
+
+        result = cycle.execute(RunWorkerCycleCommand(worker_id="worker-1", model_name="gpt-test"))
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.had_task)
+        self.assertIsNone(result.task_id)
+        self.assertIsNone(result.final_status)
+        self.assertEqual(result.error_code, "WORKER_CYCLE_UNEXPECTED_ERROR")
 
 if __name__ == "__main__":
     unittest.main()
-

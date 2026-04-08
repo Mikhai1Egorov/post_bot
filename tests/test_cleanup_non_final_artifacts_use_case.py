@@ -14,7 +14,6 @@ from post_bot.application.use_cases.cleanup_non_final_artifacts import (  # noqa
 from post_bot.infrastructure.testing.in_memory import InMemoryFileStorage, InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import ArtifactType  # noqa: E402
 
-
 class CleanupNonFinalArtifactsUseCaseTests(unittest.TestCase):
     def test_cleanup_deletes_only_non_final_artifacts(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -109,4 +108,3 @@ class CleanupNonFinalArtifactsUseCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from datetime import datetime
 import logging
 import sys
 from pathlib import Path
@@ -10,18 +11,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from post_bot.application.use_cases.cleanup_non_final_artifacts import (  # noqa: E402
     CleanupNonFinalArtifactsUseCase,
 )
+from post_bot.application.use_cases.expire_approval_batches import ExpireApprovalBatchesUseCase  # noqa: E402
 from post_bot.application.use_cases.recover_stale_tasks import RecoverStaleTasksUseCase  # noqa: E402
 from post_bot.application.use_cases.run_maintenance_cycle import (  # noqa: E402
     RunMaintenanceCycleCommand,
     RunMaintenanceCycleUseCase,
 )
+from post_bot.application.use_cases.select_expirable_approval_batches import (  # noqa: E402
+    SelectExpirableApprovalBatchesUseCase,
+)
+from post_bot.application.use_cases.select_recoverable_stale_tasks import (  # noqa: E402
+    SelectRecoverableStaleTasksUseCase,
+)
 from post_bot.domain.models import Task  # noqa: E402
 from post_bot.infrastructure.testing.in_memory import InMemoryFileStorage, InMemoryUnitOfWork  # noqa: E402
-from post_bot.shared.enums import ArtifactType, TaskBillingState, TaskStatus, UploadStatus  # noqa: E402
-
+from post_bot.shared.enums import (  # noqa: E402
+    ApprovalBatchStatus,
+    ArtifactType,
+    TaskBillingState,
+    TaskStatus,
+    UploadStatus,
+)
 
 class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
-    def _task(self, task_id: int, upload_id: int, status: TaskStatus) -> Task:
+
+    @staticmethod
+    def _task(task_id: int, upload_id: int, status: TaskStatus) -> Task:
         return Task(
             id=task_id,
             upload_id=upload_id,
@@ -46,9 +61,22 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
             retry_count=0,
         )
 
-    def _build_use_case(self, *, uow: InMemoryUnitOfWork, storage: InMemoryFileStorage) -> RunMaintenanceCycleUseCase:
+    @staticmethod
+    def _build_use_case(*, uow: InMemoryUnitOfWork, storage: InMemoryFileStorage) -> RunMaintenanceCycleUseCase:
         return RunMaintenanceCycleUseCase(
             recover_stale_tasks=RecoverStaleTasksUseCase(uow=uow, logger=logging.getLogger("test.maintenance.recover")),
+            select_recoverable_stale_tasks=SelectRecoverableStaleTasksUseCase(
+                uow=uow,
+                logger=logging.getLogger("test.maintenance.select_recoverable_stale_tasks"),
+            ),
+            select_expirable_approval_batches=SelectExpirableApprovalBatchesUseCase(
+                uow=uow,
+                logger=logging.getLogger("test.maintenance.select_expirable_approval_batches"),
+            ),
+            expire_approval_batches=ExpireApprovalBatchesUseCase(
+                uow=uow,
+                logger=logging.getLogger("test.maintenance.expire_approval_batches"),
+            ),
             cleanup_non_final_artifacts=CleanupNonFinalArtifactsUseCase(
                 uow=uow,
                 artifact_storage=storage,
@@ -87,10 +115,42 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
 
         self.assertEqual(result.recovered_count, 1)
         self.assertEqual(result.recovered_task_ids, (1,))
+        self.assertEqual(result.selected_stale_task_ids, tuple())
+        self.assertEqual(result.expired_count, 0)
+        self.assertEqual(result.expired_batch_ids, tuple())
         self.assertEqual(result.cleanup_scanned_count, 1)
         self.assertEqual(result.cleanup_deleted_count, 1)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.uploads.uploads[upload.id].upload_status, UploadStatus.FAILED)
+
+    def test_auto_selects_and_recovers_old_stale_tasks(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.tasks.create_many(
+            [
+                self._task(1, upload.id, TaskStatus.GENERATING),
+                self._task(2, upload.id, TaskStatus.PREPARING),
+            ]
+        )
+
+        uow.tasks.updated_at_by_task_id[1] = datetime(2020, 1, 1, 0, 0, 0)
+
+        use_case = self._build_use_case(uow=uow, storage=storage)
+        result = use_case.execute(
+            RunMaintenanceCycleCommand(
+                auto_recover_older_than_minutes=60,
+                auto_recover_limit=10,
+            )
+        )
+
+        self.assertEqual(result.selected_stale_task_ids, (1,))
+        self.assertEqual(result.recovered_count, 1)
+        self.assertEqual(result.recovered_task_ids, (1,))
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.PREPARING)
 
     def test_skips_recovery_without_explicit_stale_ids(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -105,6 +165,8 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
 
         self.assertEqual(result.recovered_count, 0)
         self.assertEqual(result.recovered_task_ids, tuple())
+        self.assertEqual(result.selected_stale_task_ids, tuple())
+        self.assertEqual(result.expired_count, 0)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.GENERATING)
 
     def test_cleanup_can_be_disabled(self) -> None:
@@ -139,6 +201,50 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
         self.assertEqual(result.cleanup_deleted_count, 0)
         self.assertEqual(len(uow.artifacts.records), 1)
 
+    def test_expires_approval_batches_by_explicit_ids(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+
+        batch_ready = uow.approval_batches.create_ready(upload_id=100, user_id=20)
+        batch_notified = uow.approval_batches.create_ready(upload_id=101, user_id=20)
+        batch_published = uow.approval_batches.create_ready(upload_id=102, user_id=20)
+
+        uow.approval_batches.set_status(batch_notified.id, ApprovalBatchStatus.USER_NOTIFIED)
+        uow.approval_batches.set_status(batch_published.id, ApprovalBatchStatus.PUBLISHED)
+
+        use_case = self._build_use_case(uow=uow, storage=storage)
+        result = use_case.execute(
+            RunMaintenanceCycleCommand(expirable_batch_ids=(batch_ready.id, batch_notified.id, batch_published.id))
+        )
+
+        self.assertEqual(result.expired_count, 2)
+        self.assertEqual(result.expired_batch_ids, (batch_ready.id, batch_notified.id))
+        self.assertEqual(uow.approval_batches.records[batch_ready.id].batch_status, ApprovalBatchStatus.EXPIRED)
+        self.assertEqual(uow.approval_batches.records[batch_notified.id].batch_status, ApprovalBatchStatus.EXPIRED)
+        self.assertEqual(uow.approval_batches.records[batch_published.id].batch_status, ApprovalBatchStatus.PUBLISHED)
+
+    def test_auto_selects_and_expires_old_approval_batches(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+
+        old_batch = uow.approval_batches.create_ready(upload_id=200, user_id=20)
+        new_batch = uow.approval_batches.create_ready(upload_id=201, user_id=20)
+
+        uow.approval_batches.records[old_batch.id].created_at = datetime(2020, 1, 1, 0, 0, 0)
+
+        use_case = self._build_use_case(uow=uow, storage=storage)
+        result = use_case.execute(
+            RunMaintenanceCycleCommand(
+                auto_expire_older_than_minutes=60,
+                auto_expire_limit=10,
+            )
+        )
+
+        self.assertEqual(result.selected_expirable_batch_ids, (old_batch.id,))
+        self.assertEqual(result.expired_count, 1)
+        self.assertEqual(result.expired_batch_ids, (old_batch.id,))
+        self.assertEqual(uow.approval_batches.records[old_batch.id].batch_status, ApprovalBatchStatus.EXPIRED)
+        self.assertEqual(uow.approval_batches.records[new_batch.id].batch_status, ApprovalBatchStatus.READY)
 
 if __name__ == "__main__":
     unittest.main()

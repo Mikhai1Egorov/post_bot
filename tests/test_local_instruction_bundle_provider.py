@@ -11,9 +11,10 @@ from post_bot.infrastructure.storage.local_instruction_bundle_provider import Lo
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 from post_bot.shared.errors import InternalError  # noqa: E402
 
-
 class LocalInstructionBundleProviderTests(unittest.TestCase):
-    def _make_temp_root(self, name: str) -> Path:
+
+    @staticmethod
+    def _make_temp_root(name: str) -> Path:
         root = Path(__file__).resolve().parents[1] / name
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
@@ -59,7 +60,5 @@ class LocalInstructionBundleProviderTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-
 if __name__ == "__main__":
     unittest.main()
-

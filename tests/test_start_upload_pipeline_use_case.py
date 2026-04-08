@@ -22,6 +22,7 @@ from post_bot.shared.enums import UploadBillingStatus, UploadStatus  # noqa: E40
 
 
 class StartUploadPipelineUseCaseTests(unittest.TestCase):
+
     @staticmethod
     def _build_use_case(*, uow: InMemoryUnitOfWork, storage: InMemoryFileStorage, parser: FakeExcelTaskParser) -> StartUploadPipelineUseCase:
         return StartUploadPipelineUseCase(
@@ -140,7 +141,5 @@ class StartUploadPipelineUseCaseTests(unittest.TestCase):
         self.assertEqual(result.billing_status, UploadBillingStatus.REJECTED)
         self.assertEqual(result.tasks_created, 0)
 
-
 if __name__ == "__main__":
     unittest.main()
-

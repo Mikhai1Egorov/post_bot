@@ -1,4 +1,4 @@
-"""MySQL repository implementations for Unit of Work."""
+﻿"""MySQL repository implementations for Unit of Work."""
 
 from __future__ import annotations
 
@@ -411,6 +411,30 @@ class MySQLTaskRepository(_BaseMySQLRepository):
             values,
         )
         return [self._map_task(row) for row in rows]
+
+    def list_stale_ids(
+        self,
+        *,
+        statuses: tuple[TaskStatus, ...],
+        threshold_before: datetime,
+        limit: int,
+    ) -> tuple[int, ...]:
+        if limit < 1 or not statuses:
+            return tuple()
+
+        placeholders = ", ".join(["%s"] * len(statuses))
+        rows = self._fetchall(
+            f"""
+            SELECT t.id
+            FROM tasks t
+            WHERE t.task_status IN ({placeholders})
+              AND t.updated_at <= %s
+            ORDER BY t.updated_at, t.id
+            LIMIT %s
+            """,
+            tuple(status.value for status in statuses) + (threshold_before, limit),
+        )
+        return tuple(int(row[0]) for row in rows)
 
     def claim_next_for_worker(self, worker_id: str) -> Task | None:
         row = self._fetchone(
@@ -1040,6 +1064,30 @@ class MySQLApprovalBatchRepository(_BaseMySQLRepository):
         if row is None:
             return None
         return self._map_batch(row)
+
+    def list_expirable_ids(
+        self,
+        *,
+        statuses: tuple[ApprovalBatchStatus, ...],
+        threshold_before: datetime,
+        limit: int,
+    ) -> tuple[int, ...]:
+        if limit < 1 or not statuses:
+            return tuple()
+
+        placeholders = ", ".join(["%s"] * len(statuses))
+        rows = self._fetchall(
+            f"""
+            SELECT b.id
+            FROM approval_batches b
+            WHERE b.batch_status IN ({placeholders})
+              AND COALESCE(b.notified_at, b.created_at) <= %s
+            ORDER BY COALESCE(b.notified_at, b.created_at), b.id
+            LIMIT %s
+            """,
+            tuple(status.value for status in statuses) + (threshold_before, limit),
+        )
+        return tuple(int(row[0]) for row in rows)
 
     def set_status(self, batch_id: int, status: ApprovalBatchStatus) -> None:
         now = _utc_now_naive()

@@ -42,7 +42,6 @@ from post_bot.infrastructure.db.mysql_repositories import (
 )
 from post_bot.shared.errors import InternalError
 
-
 class MySQLUnitOfWork:
     """Transaction boundary with concrete MySQL repositories."""
 
@@ -132,7 +131,6 @@ class MySQLUnitOfWork:
                 self._connection = None
         finally:
             self._lock.release()
-
 
 def build_mysql_uow_from_dsn(dsn: str) -> MySQLUnitOfWork:
     return MySQLUnitOfWork(connection_factory=MySQLConnectionFactory(dsn))

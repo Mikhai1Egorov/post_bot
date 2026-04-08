@@ -11,7 +11,6 @@ from post_bot.bot.handlers.start_upload_pipeline_response import build_start_upl
 from post_bot.domain.models import UploadValidationErrorItem  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage, UploadBillingStatus, UploadStatus  # noqa: E402
 
-
 class StartUploadPipelineResponseHandlerTests(unittest.TestCase):
     def test_processing_started_response(self) -> None:
         result = StartUploadPipelineResult(
@@ -71,7 +70,5 @@ class StartUploadPipelineResponseHandlerTests(unittest.TestCase):
         self.assertIn("Row 4:", text)
         self.assertIn("- channel: Required field is missing.", text)
 
-
 if __name__ == "__main__":
     unittest.main()
-

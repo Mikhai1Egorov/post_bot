@@ -13,9 +13,10 @@ from post_bot.pipeline.modules.preparation import PreparationModule  # noqa: E40
 from post_bot.pipeline.modules.prompt_resolver import PromptResolverModule  # noqa: E402
 from post_bot.shared.errors import BusinessRuleError, InternalError  # noqa: E402
 
-
 class PreparationAndPromptResolverTests(unittest.TestCase):
-    def _task(self) -> Task:
+
+    @staticmethod
+    def _task() -> Task:
         return Task(
             id=1,
             upload_id=10,
@@ -87,7 +88,5 @@ class PreparationAndPromptResolverTests(unittest.TestCase):
         with self.assertRaises(BusinessRuleError):
             PromptResolverModule(loader=InMemoryPromptLoader(resources)).resolve(payload=prepared, research_context=None)
 
-
 if __name__ == "__main__":
     unittest.main()
-

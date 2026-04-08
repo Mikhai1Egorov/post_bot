@@ -26,7 +26,6 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
 )
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
 
-
 def _resources() -> dict[str, str]:
     return {
         "SYSTEM_INSTRUCTIONS.txt": "SYSTEM",
@@ -37,7 +36,6 @@ def _resources() -> dict[str, str]:
         "CONTENT_LENGTH_RULES.txt": "LENGTH RULES",
         "LENGTH-BLOCKS.txt": "OPTIONAL RULES",
     }
-
 
 class RuntimeWiringTests(unittest.TestCase):
 
@@ -123,7 +121,5 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.tasks.tasks[1].last_error_message, "RESEARCH_CLIENT_NOT_CONFIGURED: Research adapter is not configured.")
 
-
 if __name__ == "__main__":
     unittest.main()
-

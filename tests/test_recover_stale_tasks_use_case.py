@@ -16,9 +16,10 @@ from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadStatus  # noqa: E402
 from post_bot.shared.errors import BusinessRuleError  # noqa: E402
 
-
 class RecoverStaleTasksUseCaseTests(unittest.TestCase):
-    def _task(self, task_id: int, upload_id: int, status: TaskStatus) -> Task:
+
+    @staticmethod
+    def _task(task_id: int, upload_id: int, status: TaskStatus) -> Task:
         return Task(
             id=task_id,
             upload_id=upload_id,
@@ -103,7 +104,6 @@ class RecoverStaleTasksUseCaseTests(unittest.TestCase):
 
         with self.assertRaises(BusinessRuleError):
             use_case.execute(RecoverStaleTasksCommand(statuses=tuple(), allow_bulk_status_recovery=True))
-
 
 if __name__ == "__main__":
     unittest.main()

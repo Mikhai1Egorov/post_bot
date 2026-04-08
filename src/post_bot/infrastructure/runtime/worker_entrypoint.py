@@ -1,4 +1,4 @@
-﻿"""CLI entrypoint for worker runtime."""
+"""CLI entrypoint for worker runtime."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-id", required=True, help="Unique worker id for logs/audit.")
     parser.add_argument("--model-name", required=True, help="Model name passed to generation stage.")
     parser.add_argument("--max-cycles", type=int, default=None, help="Optional bounded cycle count.")
+    parser.add_argument("--max-failed-cycles", type=int, default=None, help="Stop early after this many failed cycles.")
     parser.add_argument("--idle-sleep", type=float, default=0.5, help="Sleep seconds when queue is empty.")
     parser.add_argument("--project-root", default=".", help="Project root containing prompt resources.")
     parser.add_argument("--data-dir", default=None, help="Directory for runtime artifact files.")
@@ -42,15 +43,17 @@ def main() -> int:
             worker_id=args.worker_id,
             model_name=args.model_name,
             max_cycles=args.max_cycles,
+            max_failed_cycles=args.max_failed_cycles,
             idle_sleep_seconds=args.idle_sleep,
         )
     )
     logger.info(
-        "worker_runtime_result worker_id=%s cycles=%s processed=%s failed=%s",
+        "worker_runtime_result worker_id=%s cycles=%s processed=%s failed=%s terminated_early=%s",
         args.worker_id,
         result.cycles_executed,
         result.tasks_processed,
         result.failed_cycles,
+        result.terminated_early,
     )
     return 0
 

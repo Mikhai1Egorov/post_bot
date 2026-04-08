@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from post_bot.infrastructure.external.http_clients import HttpLLMClient, HttpPublisher, HttpResearchClient  # noqa: E402
 from post_bot.shared.errors import ExternalDependencyError  # noqa: E402
 
-
 class _FakeResponse:
     def __init__(self, *, status: int = 200, payload: dict[str, object]) -> None:
         self.status = status
@@ -141,4 +140,3 @@ class HttpAdaptersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

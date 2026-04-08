@@ -17,7 +17,6 @@ from post_bot.shared.constants import (  # noqa: E402
     SEARCH_LANGUAGE_VALUES,
 )
 
-
 class ContractConstantsTests(unittest.TestCase):
     def test_required_fields_are_present(self) -> None:
         self.assertEqual(
@@ -44,4 +43,3 @@ class ContractConstantsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

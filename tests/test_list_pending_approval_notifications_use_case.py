@@ -17,8 +17,8 @@ from post_bot.shared.enums import (  # noqa: E402
     TaskStatus,
 )
 
-
 class ListPendingApprovalNotificationsUseCaseTests(unittest.TestCase):
+
     @staticmethod
     def _task(*, task_id: int, upload_id: int, user_id: int, status: TaskStatus) -> Task:
         return Task(
@@ -105,7 +105,6 @@ class ListPendingApprovalNotificationsUseCaseTests(unittest.TestCase):
 
         result = use_case.execute()
         self.assertEqual(result.notifications, tuple())
-
 
 if __name__ == "__main__":
     unittest.main()

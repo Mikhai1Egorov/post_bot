@@ -12,7 +12,6 @@ from post_bot.application.use_cases.open_instructions import OpenInstructionsCom
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage, UserActionType  # noqa: E402
 
-
 class FakeInstructionBundleProvider:
     def __init__(self, bundle: InstructionBundle) -> None:
         self._bundle = bundle
@@ -20,7 +19,6 @@ class FakeInstructionBundleProvider:
     def load_bundle(self, *, interface_language: InterfaceLanguage) -> InstructionBundle:
         _ = interface_language
         return self._bundle
-
 
 class OpenInstructionsUseCaseTests(unittest.TestCase):
     def test_execute_returns_bundle_and_logs_action(self) -> None:
@@ -59,7 +57,5 @@ class OpenInstructionsUseCaseTests(unittest.TestCase):
             },
         )
 
-
 if __name__ == "__main__":
     unittest.main()
-

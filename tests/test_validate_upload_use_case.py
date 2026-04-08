@@ -14,7 +14,6 @@ from post_bot.infrastructure.testing.in_memory import FakeExcelTaskParser, InMem
 from post_bot.pipeline.modules.validation import ExcelContractValidator  # noqa: E402
 from post_bot.shared.enums import UploadStatus  # noqa: E402
 
-
 class ValidateUploadUseCaseTests(unittest.TestCase):
     def test_sets_validated_status_when_no_errors(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -103,7 +102,5 @@ class ValidateUploadUseCaseTests(unittest.TestCase):
         self.assertEqual(upload.upload_status, UploadStatus.VALIDATION_FAILED)
         self.assertGreater(len(uow.uploads.validation_errors), 0)
 
-
 if __name__ == "__main__":
     unittest.main()
-

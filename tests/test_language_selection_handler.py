@@ -15,7 +15,6 @@ from post_bot.bot.handlers.language_selection import (  # noqa: E402
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
-
 class LanguageSelectionHandlerTests(unittest.TestCase):
     def test_handle_creates_user_and_returns_localized_prompt(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -62,4 +61,3 @@ class LanguageSelectionHandlerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

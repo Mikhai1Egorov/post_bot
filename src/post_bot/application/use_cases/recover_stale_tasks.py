@@ -12,7 +12,7 @@ from post_bot.shared.enums import TaskStatus
 from post_bot.shared.errors import BusinessRuleError
 from post_bot.shared.logging import TimedLog, log_event
 
-_DEFAULT_RECOVERABLE_STATUSES: tuple[TaskStatus, ...] = (
+DEFAULT_RECOVERABLE_TASK_STATUSES: tuple[TaskStatus, ...] = (
     TaskStatus.QUEUED,
     TaskStatus.PREPARING,
     TaskStatus.RESEARCHING,
@@ -24,7 +24,7 @@ _DEFAULT_RECOVERABLE_STATUSES: tuple[TaskStatus, ...] = (
 @dataclass(slots=True, frozen=True)
 class RecoverStaleTasksCommand:
     reason_code: str = "STALE_TASK_RECOVERY"
-    statuses: tuple[TaskStatus, ...] = _DEFAULT_RECOVERABLE_STATUSES
+    statuses: tuple[TaskStatus, ...] = DEFAULT_RECOVERABLE_TASK_STATUSES
     task_ids: tuple[int, ...] | None = None
     allow_bulk_status_recovery: bool = False
     changed_by: str = "system_recovery"

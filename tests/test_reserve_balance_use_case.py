@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import sys
@@ -19,7 +19,9 @@ from post_bot.shared.errors import BusinessRuleError  # noqa: E402
 
 
 class ReserveBalanceUseCaseTests(unittest.TestCase):
-    def _create_validated_upload(self) -> tuple[InMemoryUnitOfWork, InMemoryFileStorage, int]:
+
+    @staticmethod
+    def _create_validated_upload() -> tuple[InMemoryUnitOfWork, InMemoryFileStorage, int]:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
         intake = UploadIntakeUseCase(uow=uow, file_storage=storage, logger=logging.getLogger("test.intake"))
@@ -156,7 +158,6 @@ class ReserveBalanceUseCaseTests(unittest.TestCase):
         self.assertEqual(len(uow.ledger.entries), 1)
         self.assertEqual(sum(1 for item in results if not item.idempotent), 1)
         self.assertEqual(sum(1 for item in results if item.idempotent), 7)
-
 
 if __name__ == "__main__":
     unittest.main()

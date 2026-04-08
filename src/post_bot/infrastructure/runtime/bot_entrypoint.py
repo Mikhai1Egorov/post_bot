@@ -1,4 +1,4 @@
-"""CLI entrypoint for Telegram polling runtime."""
+﻿"""CLI entrypoint for Telegram polling runtime."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from post_bot.infrastructure.telegram import TelegramHttpGateway
 from post_bot.shared.config import AppConfig
 from post_bot.shared.logging import configure_logging
 
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run post-bot Telegram polling runtime.")
     parser.add_argument("--project-root", default=".", help="Project root containing template/readme resources.")
@@ -24,7 +23,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--offset", type=int, default=None, help="Optional initial Telegram update offset.")
     parser.add_argument("--idle-sleep", type=float, default=0.2, help="Sleep seconds when there are no updates.")
     return parser
-
 
 def main() -> int:
     args = _build_parser().parse_args()
@@ -84,7 +82,6 @@ def main() -> int:
         result.next_offset,
     )
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

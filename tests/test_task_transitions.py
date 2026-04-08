@@ -10,7 +10,6 @@ from post_bot.domain.transitions import ensure_task_transition, is_task_final  #
 from post_bot.shared.enums import TaskStatus  # noqa: E402
 from post_bot.shared.errors import BusinessRuleError  # noqa: E402
 
-
 class TaskTransitionTests(unittest.TestCase):
     @staticmethod
     def test_happy_path_instant() -> None:
@@ -42,7 +41,6 @@ class TaskTransitionTests(unittest.TestCase):
         for old, new in zip(sequence, sequence[1:]):
             ensure_task_transition(old, new)
 
-
     @staticmethod
     def test_retry_requeue_transitions() -> None:
         ensure_task_transition(TaskStatus.PREPARING, TaskStatus.QUEUED)
@@ -59,7 +57,5 @@ class TaskTransitionTests(unittest.TestCase):
         self.assertTrue(is_task_final(TaskStatus.CANCELLED))
         self.assertFalse(is_task_final(TaskStatus.RENDERING))
 
-
 if __name__ == "__main__":
     unittest.main()
-

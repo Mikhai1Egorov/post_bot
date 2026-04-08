@@ -14,13 +14,28 @@ from post_bot.pipeline.modules.post_processing import PostProcessingModule  # no
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadStatus  # noqa: E402
 
 
+class _FailingArtifactStorage(InMemoryFileStorage):
+    def save_task_artifact(
+        self,
+        *,
+        task_id: int | None,
+        artifact_type,
+        file_name: str,
+        content: bytes,
+    ) -> str:
+        _ = (task_id, artifact_type, file_name, content)
+        raise OSError("disk write failure")
+
 class RunTaskRenderingUseCaseTests(unittest.TestCase):
-    def _create_processing_upload(self, uow: InMemoryUnitOfWork) -> int:
+
+    @staticmethod
+    def _create_processing_upload(uow: InMemoryUnitOfWork) -> int:
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
         return upload.id
 
-    def _task(self, *, upload_id: int, mode: str = "instant") -> Task:
+    @staticmethod
+    def _task(*, upload_id: int, mode: str = "instant") -> Task:
         return Task(
             id=1,
             upload_id=upload_id,
@@ -44,7 +59,8 @@ class RunTaskRenderingUseCaseTests(unittest.TestCase):
             task_status=TaskStatus.RENDERING,
         )
 
-    def _seed_successful_generation(self, uow: InMemoryUnitOfWork, task_id: int) -> None:
+    @staticmethod
+    def _seed_successful_generation(uow: InMemoryUnitOfWork, task_id: int) -> None:
         gen = uow.generations.create_started(
             task_id=task_id,
             model_name="gpt",
@@ -124,7 +140,31 @@ class RunTaskRenderingUseCaseTests(unittest.TestCase):
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.FAILED)
 
+    def test_rendering_handles_unexpected_storage_exception(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = _FailingArtifactStorage()
+        upload_id = self._create_processing_upload(uow)
+        uow.tasks.create_many([self._task(upload_id=upload_id, mode="instant")])
+        self._seed_successful_generation(uow, task_id=1)
+
+        use_case = RunTaskRenderingUseCase(
+            uow=uow,
+            artifact_storage=storage,
+            post_processing=PostProcessingModule(),
+            logger=logging.getLogger("test.rendering"),
+        )
+
+        result = use_case.execute(RunTaskRenderingCommand(task_id=1, changed_by="worker-1"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "RENDERING_UNEXPECTED_ERROR")
+        self.assertEqual(result.task_status, TaskStatus.FAILED)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
+        self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.FAILED)
+
+        render = uow.renders.get_by_task_id(1)
+        self.assertIsNotNone(render)
+        self.assertEqual(render.render_status.value, "FAILED")
 
 if __name__ == "__main__":
     unittest.main()
-

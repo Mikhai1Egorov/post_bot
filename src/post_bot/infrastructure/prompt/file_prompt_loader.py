@@ -6,7 +6,6 @@ from pathlib import Path
 
 from post_bot.shared.errors import ExternalDependencyError
 
-
 class FilePromptResourceLoader:
     def __init__(self, root_dir: str | Path) -> None:
         self._root = Path(root_dir)
@@ -21,4 +20,3 @@ class FilePromptResourceLoader:
                 retryable=False,
             )
         return path.read_text(encoding="utf-8")
-

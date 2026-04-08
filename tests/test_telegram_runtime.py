@@ -37,7 +37,9 @@ from post_bot.shared.enums import (  # noqa: E402
 
 
 class FakeInstructionBundleProvider:
-    def load_bundle(self, *, interface_language):  # noqa: ANN001
+
+    @staticmethod
+    def load_bundle(*, interface_language):  # noqa: ANN001
         _ = interface_language
         return InstructionBundle(
             template_file_name="NEO_TEMPLATE.xlsx",
@@ -45,7 +47,6 @@ class FakeInstructionBundleProvider:
             readme_file_name="README_PIPELINE.txt",
             readme_bytes=b"readme",
         )
-
 
 class FakeTelegramGateway:
     def __init__(self, updates: list[dict], files: dict[str, TelegramDownloadedFile]) -> None:
@@ -85,11 +86,11 @@ class FakeTelegramGateway:
     def answer_callback_query(self, *, callback_query_id: str) -> None:
         self.answered_callbacks.append(callback_query_id)
 
-
 class TelegramRuntimeTests(unittest.TestCase):
+
+    @staticmethod
     def _build_runtime(
-        self,
-        *,
+            *,
         gateway: FakeTelegramGateway,
         uow: InMemoryUnitOfWork,
         storage: InMemoryFileStorage | None = None,
@@ -474,7 +475,6 @@ class TelegramRuntimeTests(unittest.TestCase):
         publication = uow.publications.get_latest_for_task(task_id)
         self.assertIsNotNone(publication)
         self.assertEqual(publication.publication_status, PublicationStatus.PUBLISHED)
-
 
 if __name__ == "__main__":
     unittest.main()

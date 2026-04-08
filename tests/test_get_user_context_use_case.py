@@ -12,7 +12,6 @@ from post_bot.application.use_cases.ensure_user import EnsureUserCommand, Ensure
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
-
 class GetUserContextUseCaseTests(unittest.TestCase):
     def test_returns_not_found_for_unknown_telegram_user(self) -> None:
         uow = InMemoryUnitOfWork()

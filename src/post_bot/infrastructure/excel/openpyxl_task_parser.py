@@ -59,4 +59,3 @@ class OpenPyxlTaskParser:
                 continue
             return False
         return True
-

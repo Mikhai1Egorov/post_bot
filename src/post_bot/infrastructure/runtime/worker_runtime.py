@@ -17,6 +17,7 @@ class WorkerRuntimeCommand:
     worker_id: str
     model_name: str
     max_cycles: int | None = None
+    max_failed_cycles: int | None = None
     idle_sleep_seconds: float = 0.5
 
 
@@ -25,6 +26,7 @@ class WorkerRuntimeResult:
     cycles_executed: int
     tasks_processed: int
     failed_cycles: int
+    terminated_early: bool = False
 
 
 class WorkerRuntime:
@@ -48,6 +50,12 @@ class WorkerRuntime:
                 message="max_cycles must be >= 1 when provided.",
                 details={"max_cycles": command.max_cycles},
             )
+        if command.max_failed_cycles is not None and command.max_failed_cycles < 1:
+            raise BusinessRuleError(
+                code="WORKER_MAX_FAILED_CYCLES_INVALID",
+                message="max_failed_cycles must be >= 1 when provided.",
+                details={"max_failed_cycles": command.max_failed_cycles},
+            )
         if command.idle_sleep_seconds < 0:
             raise BusinessRuleError(
                 code="WORKER_IDLE_SLEEP_INVALID",
@@ -60,6 +68,7 @@ class WorkerRuntime:
         cycles = 0
         tasks_processed = 0
         failed_cycles = 0
+        terminated_early = False
 
         while True:
             cycle = self._run_worker_cycle.execute(
@@ -69,16 +78,28 @@ class WorkerRuntime:
 
             if cycle.had_task:
                 tasks_processed += 1
-                if not cycle.success:
-                    failed_cycles += 1
-            else:
+
+            should_sleep = False
+            if not cycle.success:
+                failed_cycles += 1
+                if command.max_failed_cycles is not None and failed_cycles >= command.max_failed_cycles:
+                    terminated_early = True
+                    break
+                # In unbounded mode we always back off after failures to avoid hot crash-loops.
                 if command.max_cycles is None:
-                    self._sleep_fn(command.idle_sleep_seconds)
+                    should_sleep = True
+
+            if not cycle.had_task:
+                if command.max_cycles is None:
+                    should_sleep = True
                 else:
                     break
 
             if command.max_cycles is not None and cycles >= command.max_cycles:
                 break
+
+            if should_sleep and command.idle_sleep_seconds > 0:
+                self._sleep_fn(command.idle_sleep_seconds)
 
         log_event(
             self._logger,
@@ -92,10 +113,14 @@ class WorkerRuntime:
                 "cycles_executed": cycles,
                 "tasks_processed": tasks_processed,
                 "failed_cycles": failed_cycles,
+                "max_failed_cycles": command.max_failed_cycles,
+                "terminated_early": terminated_early,
             },
         )
         return WorkerRuntimeResult(
             cycles_executed=cycles,
             tasks_processed=tasks_processed,
             failed_cycles=failed_cycles,
+            terminated_early=terminated_early,
         )
+

@@ -14,7 +14,8 @@ from post_bot.shared.errors import ValidationError  # noqa: E402
 
 
 class PostProcessingModuleTests(unittest.TestCase):
-    def _task(self, *, include_image: bool = False, footer: bool = False, schedule: bool = False) -> Task:
+    @staticmethod
+    def _task(*, include_image: bool = False, footer: bool = False, schedule: bool = False) -> Task:
         return Task(
             id=7,
             upload_id=2,
@@ -75,7 +76,5 @@ Paragraph two.
         with self.assertRaises(ValidationError):
             PostProcessingModule().render(task=self._task(), raw_output_text="   \n   ")
 
-
 if __name__ == "__main__":
     unittest.main()
-

@@ -25,7 +25,9 @@ from post_bot.shared.errors import ExternalDependencyError  # noqa: E402
 
 
 class RunTaskGenerationUseCaseTests(unittest.TestCase):
-    def _resources(self) -> dict[str, str]:
+
+    @staticmethod
+    def _resources() -> dict[str, str]:
         return {
             "SYSTEM_INSTRUCTIONS.txt": "SYSTEM",
             "JOURNALIST_PROMPT_STYLE.txt": "STYLE JOURNALISTIC",
@@ -36,12 +38,14 @@ class RunTaskGenerationUseCaseTests(unittest.TestCase):
             "LENGTH-BLOCKS.txt": "OPTIONAL RULES",
         }
 
-    def _create_processing_upload(self, uow: InMemoryUnitOfWork) -> int:
+    @staticmethod
+    def _create_processing_upload(uow: InMemoryUnitOfWork) -> int:
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
         return upload.id
 
-    def _queued_task(self, *, upload_id: int, style: str = "journalistic") -> Task:
+    @staticmethod
+    def _queued_task(*, upload_id: int, style: str = "journalistic") -> Task:
         return Task(
             id=1,
             upload_id=upload_id,
@@ -176,6 +180,7 @@ class RunTaskGenerationUseCaseTests(unittest.TestCase):
         self.assertEqual(result.error_code, "LLM_TIMEOUT")
         self.assertEqual(uow.tasks.tasks[1].retry_count, TASK_MAX_RETRY_ATTEMPTS + 1)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.FAILED)
+
     def test_prompt_template_not_found_fails_without_generation_record(self) -> None:
         uow = InMemoryUnitOfWork()
         upload_id = self._create_processing_upload(uow)
@@ -195,7 +200,5 @@ class RunTaskGenerationUseCaseTests(unittest.TestCase):
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.FAILED)
         self.assertEqual(len(uow.generations.records), 0)
 
-
 if __name__ == "__main__":
     unittest.main()
-

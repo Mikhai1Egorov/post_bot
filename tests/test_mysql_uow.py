@@ -11,26 +11,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from post_bot.infrastructure.db.mysql_uow import MySQLUnitOfWork  # noqa: E402
 from post_bot.shared.errors import InternalError  # noqa: E402
 
-
 class _FakeCursor:
     rowcount = 0
     lastrowid = 0
 
-    def execute(self, operation, params=None):  # noqa: ANN001
+    @staticmethod
+    def execute(operation, params=None):  # noqa: ANN001
         return None
 
-    def executemany(self, operation, seq_of_params):  # noqa: ANN001
+    @staticmethod
+    def executemany(operation, seq_of_params):  # noqa: ANN001
         return None
 
-    def fetchone(self):
+    @staticmethod
+    def fetchone():
         return None
 
-    def fetchall(self):
+    @staticmethod
+    def fetchall():
         return []
 
-    def close(self):
+    @staticmethod
+    def close():
         return None
-
 
 class _FakeConnection:
     def __init__(self) -> None:
@@ -38,7 +41,8 @@ class _FakeConnection:
         self.rollbacks = 0
         self.closed = 0
 
-    def cursor(self):
+    @staticmethod
+    def cursor():
         return _FakeCursor()
 
     def commit(self):
@@ -49,7 +53,6 @@ class _FakeConnection:
 
     def close(self):
         self.closed += 1
-
 
 class MySQLUnitOfWorkTests(unittest.TestCase):
     def test_commit_requires_enter(self) -> None:
@@ -112,7 +115,5 @@ class MySQLUnitOfWorkTests(unittest.TestCase):
         self.assertEqual(sum(c.commits for c in created_connections), 2)
         self.assertEqual(sum(c.closed for c in created_connections), 2)
 
-
 if __name__ == "__main__":
     unittest.main()
-

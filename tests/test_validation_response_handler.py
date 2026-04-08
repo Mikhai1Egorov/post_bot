@@ -11,7 +11,6 @@ from post_bot.bot.handlers.validation_response import build_validation_response 
 from post_bot.domain.models import UploadValidationErrorItem  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage, UploadStatus  # noqa: E402
 
-
 class ValidationResponseHandlerTests(unittest.TestCase):
     def test_validated_response_is_processing_started(self) -> None:
         result = ValidateUploadResult(

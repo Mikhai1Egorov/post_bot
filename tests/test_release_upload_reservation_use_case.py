@@ -23,7 +23,9 @@ from post_bot.shared.enums import LedgerEntryType, TaskBillingState, TaskStatus,
 
 
 class ReleaseUploadReservationUseCaseTests(unittest.TestCase):
-    def _prepare_reserved_upload_with_created_tasks(self) -> tuple[InMemoryUnitOfWork, int]:
+
+    @staticmethod
+    def _prepare_reserved_upload_with_created_tasks() -> tuple[InMemoryUnitOfWork, int]:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
 
@@ -130,7 +132,5 @@ class ReleaseUploadReservationUseCaseTests(unittest.TestCase):
         self.assertTrue(second.idempotent)
         self.assertEqual(second.released_articles_count, 0)
 
-
 if __name__ == "__main__":
     unittest.main()
-

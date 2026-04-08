@@ -20,7 +20,6 @@ from post_bot.pipeline.modules.validation import ExcelContractValidator  # noqa:
 from post_bot.shared.enums import LedgerEntryType, TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
 from post_bot.shared.errors import BusinessRuleError  # noqa: E402
 
-
 class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
     @staticmethod
     def _prepare_validated_upload() -> tuple[InMemoryUnitOfWork, InMemoryFileStorage, int, tuple]:
@@ -239,7 +238,5 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         self.assertEqual(upload.billing_status, UploadBillingStatus.CONSUMED)
         self.assertEqual(upload.reserved_articles_count, 0)
 
-
 if __name__ == "__main__":
     unittest.main()
-

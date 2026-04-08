@@ -11,7 +11,6 @@ from post_bot.application.use_cases.ensure_user import EnsureUserCommand, Ensure
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage, UserActionType  # noqa: E402
 
-
 class EnsureUserUseCaseTests(unittest.TestCase):
     def test_create_user_with_language_and_action(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -69,4 +68,3 @@ class EnsureUserUseCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

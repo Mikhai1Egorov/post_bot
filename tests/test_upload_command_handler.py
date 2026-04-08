@@ -18,8 +18,8 @@ from post_bot.infrastructure.testing.in_memory import FakeExcelTaskParser, InMem
 from post_bot.pipeline.modules.validation import ExcelContractValidator  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
-
 class UploadCommandHandlerTests(unittest.TestCase):
+
     @staticmethod
     def _build_handler(*, uow: InMemoryUnitOfWork, parser: FakeExcelTaskParser) -> UploadCommandHandler:
         storage = InMemoryFileStorage()
@@ -147,7 +147,5 @@ class UploadCommandHandlerTests(unittest.TestCase):
         self.assertEqual(result.status, "insufficient_balance")
         self.assertIn("Required: 1. Available: 0.", result.response_text)
 
-
 if __name__ == "__main__":
     unittest.main()
-

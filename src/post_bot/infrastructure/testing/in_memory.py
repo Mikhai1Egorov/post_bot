@@ -1,4 +1,4 @@
-"""In-memory adapters for deterministic unit tests."""
+﻿"""In-memory adapters for deterministic unit tests."""
 
 from __future__ import annotations
 
@@ -145,6 +145,7 @@ class InMemoryUploadRepository:
 class InMemoryTaskRepository:
     def __init__(self) -> None:
         self.tasks: dict[int, Task] = {}
+        self.updated_at_by_task_id: dict[int, datetime] = {}
         self._next_id = 1
 
     def create_many(self, tasks: list[Task]) -> list[Task]:
@@ -153,6 +154,7 @@ class InMemoryTaskRepository:
             if task.id <= 0:
                 task = replace(task, id=self._next_id)
             self.tasks[task.id] = task
+            self.updated_at_by_task_id[task.id] = _utc_now_naive()
             created.append(task)
             self._next_id = max(self._next_id, task.id + 1)
         return created
@@ -168,7 +170,6 @@ class InMemoryTaskRepository:
                 items.append(task)
         return items
 
-
     def list_by_statuses(self, statuses: tuple[TaskStatus, ...]) -> list[Task]:
         items: list[Task] = []
         allowed = set(statuses)
@@ -177,6 +178,31 @@ class InMemoryTaskRepository:
             if task.task_status in allowed:
                 items.append(task)
         return items
+
+    def list_stale_ids(
+        self,
+        *,
+        statuses: tuple[TaskStatus, ...],
+        threshold_before: datetime,
+        limit: int,
+    ) -> tuple[int, ...]:
+        if limit < 1 or not statuses:
+            return tuple()
+
+        allowed = set(statuses)
+        candidates: list[tuple[datetime, int]] = []
+        for task_id, task in self.tasks.items():
+            if task.task_status not in allowed:
+                continue
+            updated_at = self.updated_at_by_task_id.get(task_id)
+            if updated_at is None:
+                continue
+            if updated_at <= threshold_before:
+                candidates.append((updated_at, task_id))
+
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return tuple(task_id for _, task_id in candidates[:limit])
+
     def claim_next_for_worker(self, worker_id: str) -> Task | None:
         for task_id in sorted(self.tasks.keys()):
             task = self.tasks[task_id]
@@ -191,16 +217,20 @@ class InMemoryTaskRepository:
         return None
 
     def set_task_status(self, task_id: int, status: TaskStatus, *, changed_by: str, reason: str | None) -> None:
+        _ = (changed_by, reason)
         task = self.tasks[task_id]
         self.tasks[task_id] = replace(task, task_status=status)
-
+        self.updated_at_by_task_id[task_id] = _utc_now_naive()
 
     def set_task_billing_state(self, task_id: int, billing_state: TaskBillingState) -> None:
         task = self.tasks[task_id]
         self.tasks[task_id] = replace(task, billing_state=billing_state)
+        self.updated_at_by_task_id[task_id] = _utc_now_naive()
+
     def set_retry_state(self, task_id: int, *, retry_count: int, last_error_message: str | None) -> None:
         task = self.tasks[task_id]
         self.tasks[task_id] = replace(task, retry_count=retry_count, last_error_message=last_error_message)
+        self.updated_at_by_task_id[task_id] = _utc_now_naive()
 
 
 class InMemoryBalanceRepository:
@@ -463,6 +493,30 @@ class InMemoryApprovalBatchRepository:
             if record.upload_id == upload_id:
                 return record
         return None
+
+    def list_expirable_ids(
+        self,
+        *,
+        statuses: tuple[ApprovalBatchStatus, ...],
+        threshold_before: datetime,
+        limit: int,
+    ) -> tuple[int, ...]:
+        if limit < 1 or not statuses:
+            return tuple()
+
+        allowed = set(statuses)
+        candidates: list[tuple[datetime, int]] = []
+        for batch_id, record in self.records.items():
+            if record.batch_status not in allowed:
+                continue
+            reference_time = record.notified_at or record.created_at
+            if reference_time is None:
+                continue
+            if reference_time <= threshold_before:
+                candidates.append((reference_time, batch_id))
+
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return tuple(batch_id for _, batch_id in candidates[:limit])
 
     def set_status(self, batch_id: int, status: ApprovalBatchStatus) -> None:
         record = self.records[batch_id]
@@ -781,6 +835,7 @@ class InMemoryPromptLoader:
 
     def load(self, resource_name: str) -> str:
         return self._resources[resource_name]
+
 
 
 

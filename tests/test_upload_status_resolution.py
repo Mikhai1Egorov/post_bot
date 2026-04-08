@@ -11,7 +11,6 @@ from post_bot.domain.models import Task  # noqa: E402
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadStatus  # noqa: E402
 
-
 class UploadStatusResolutionTests(unittest.TestCase):
     @staticmethod
     def _make_task(task_id: int, upload_id: int, status: TaskStatus) -> Task:
@@ -105,7 +104,5 @@ class UploadStatusResolutionTests(unittest.TestCase):
         self.assertEqual(result.current_status, UploadStatus.CANCELLED)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.CANCELLED)
 
-
 if __name__ == "__main__":
     unittest.main()
-

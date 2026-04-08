@@ -126,7 +126,5 @@ class ValidationModuleTests(unittest.TestCase):
         self.assertEqual(len(result.errors), 0)
         self.assertEqual(result.normalized_rows[0].schedule_at, datetime(1900, 1, 1, 12, 0))
 
-
 if __name__ == "__main__":
     unittest.main()
-

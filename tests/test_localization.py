@@ -10,7 +10,6 @@ from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 from post_bot.shared.errors import ValidationError  # noqa: E402
 from post_bot.shared.localization import CATALOG, get_message, parse_interface_language  # noqa: E402
 
-
 class LocalizationTests(unittest.TestCase):
     def test_all_contract_languages_have_catalog(self) -> None:
         expected_languages = {lang for lang in InterfaceLanguage}
@@ -44,7 +43,6 @@ class LocalizationTests(unittest.TestCase):
         message = get_message(InterfaceLanguage.RU, "SYSTEM_READY")
         self.assertTrue(isinstance(message, str))
         self.assertNotEqual(message.strip(), "")
-
 
 if __name__ == "__main__":
     unittest.main()

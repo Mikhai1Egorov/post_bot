@@ -24,9 +24,10 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
 )
 from post_bot.shared.enums import ApprovalBatchStatus, ArtifactType, TaskBillingState, TaskStatus, UploadStatus  # noqa: E402
 
-
 class HandleApprovalActionUseCaseTests(unittest.TestCase):
-    def _task(self, task_id: int, upload_id: int, *, status: TaskStatus = TaskStatus.READY_FOR_APPROVAL) -> Task:
+
+    @staticmethod
+    def _task(task_id: int, upload_id: int, *, status: TaskStatus = TaskStatus.READY_FOR_APPROVAL) -> Task:
         return Task(
             id=task_id,
             upload_id=upload_id,
@@ -51,7 +52,8 @@ class HandleApprovalActionUseCaseTests(unittest.TestCase):
             retry_count=0,
         )
 
-    def _seed_render(self, uow: InMemoryUnitOfWork, task_id: int) -> None:
+    @staticmethod
+    def _seed_render(uow: InMemoryUnitOfWork, task_id: int) -> None:
         render = uow.renders.create_started(task_id=task_id)
         uow.renders.mark_succeeded(
             render.id,
@@ -154,7 +156,5 @@ class HandleApprovalActionUseCaseTests(unittest.TestCase):
         self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.DONE)
         self.assertEqual(uow.uploads.uploads[upload.id].upload_status, UploadStatus.COMPLETED)
 
-
 if __name__ == "__main__":
     unittest.main()
-

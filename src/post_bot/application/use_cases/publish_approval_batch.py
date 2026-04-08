@@ -1,4 +1,4 @@
-﻿"""Handle approval mode publish action."""
+"""Handle approval mode publish action."""
 
 from __future__ import annotations
 
@@ -54,10 +54,22 @@ class PublishApprovalBatchUseCase:
                         message="Approval batch does not exist.",
                         details={"batch_id": command.batch_id},
                     )
+                if batch.batch_status == ApprovalBatchStatus.PUBLISHED:
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_ALREADY_PUBLISHED",
+                        message="Approval batch is already published.",
+                        details={"batch_id": command.batch_id},
+                    )
                 if batch.batch_status == ApprovalBatchStatus.DOWNLOADED:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_ALREADY_DOWNLOADED",
                         message="Downloaded approval batch cannot be published.",
+                        details={"batch_id": command.batch_id},
+                    )
+                if batch.batch_status == ApprovalBatchStatus.EXPIRED:
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_EXPIRED",
+                        message="Expired approval batch cannot be published.",
                         details={"batch_id": command.batch_id},
                     )
 

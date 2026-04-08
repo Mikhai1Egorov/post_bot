@@ -16,12 +16,15 @@ from post_bot.application.ports import (
 from post_bot.application.use_cases.claim_next_task import ClaimNextTaskUseCase
 from post_bot.application.use_cases.cleanup_non_final_artifacts import CleanupNonFinalArtifactsUseCase
 from post_bot.application.use_cases.execute_claimed_task import ExecuteClaimedTaskUseCase
+from post_bot.application.use_cases.expire_approval_batches import ExpireApprovalBatchesUseCase
 from post_bot.application.use_cases.publish_task import PublishTaskUseCase
 from post_bot.application.use_cases.recover_stale_tasks import RecoverStaleTasksUseCase
 from post_bot.application.use_cases.run_maintenance_cycle import RunMaintenanceCycleUseCase
 from post_bot.application.use_cases.run_task_generation import RunTaskGenerationUseCase
 from post_bot.application.use_cases.run_task_rendering import RunTaskRenderingUseCase
 from post_bot.application.use_cases.run_worker_cycle import RunWorkerCycleUseCase
+from post_bot.application.use_cases.select_expirable_approval_batches import SelectExpirableApprovalBatchesUseCase
+from post_bot.application.use_cases.select_recoverable_stale_tasks import SelectRecoverableStaleTasksUseCase
 from post_bot.domain.models import TaskResearchSource
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
 from post_bot.infrastructure.db.mysql_uow import build_mysql_uow_from_dsn
@@ -188,6 +191,15 @@ def build_worker_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> Wo
 
 def build_maintenance_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> MaintenanceRuntime:
     recover = RecoverStaleTasksUseCase(uow=wiring.uow, logger=logger.getChild("recover_stale_tasks"))
+    select_recoverable = SelectRecoverableStaleTasksUseCase(
+        uow=wiring.uow,
+        logger=logger.getChild("select_recoverable_stale_tasks"),
+    )
+    select_expirable = SelectExpirableApprovalBatchesUseCase(
+        uow=wiring.uow,
+        logger=logger.getChild("select_expirable_approval_batches"),
+    )
+    expire = ExpireApprovalBatchesUseCase(uow=wiring.uow, logger=logger.getChild("expire_approval_batches"))
     cleanup = CleanupNonFinalArtifactsUseCase(
         uow=wiring.uow,
         artifact_storage=wiring.artifact_storage,
@@ -195,8 +207,10 @@ def build_maintenance_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) 
     )
     cycle = RunMaintenanceCycleUseCase(
         recover_stale_tasks=recover,
+        select_recoverable_stale_tasks=select_recoverable,
+        select_expirable_approval_batches=select_expirable,
+        expire_approval_batches=expire,
         cleanup_non_final_artifacts=cleanup,
         logger=logger.getChild("cycle"),
     )
     return MaintenanceRuntime(run_maintenance_cycle=cycle, logger=logger)
-

@@ -11,7 +11,6 @@ from post_bot.application.use_cases.upload_intake import UploadIntakeCommand, Up
 from post_bot.infrastructure.testing.in_memory import InMemoryFileStorage, InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import UploadStatus  # noqa: E402
 
-
 class UploadIntakeUseCaseTests(unittest.TestCase):
     def test_creates_received_upload_and_stores_payload(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -29,7 +28,5 @@ class UploadIntakeUseCaseTests(unittest.TestCase):
         self.assertEqual(upload.original_filename, "tasks.xlsx")
         self.assertEqual(storage.read_bytes(result.storage_path), b"xlsx-bytes")
 
-
 if __name__ == "__main__":
     unittest.main()
-

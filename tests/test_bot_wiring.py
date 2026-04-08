@@ -20,7 +20,6 @@ from post_bot.infrastructure.runtime.bot_wiring import (  # noqa: E402
 from post_bot.infrastructure.testing.in_memory import FakeExcelTaskParser, InMemoryFileStorage, InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
-
 class FakeInstructionBundleProvider:
     def __init__(self) -> None:
         self.bundle = InstructionBundle(
@@ -36,7 +35,9 @@ class FakeInstructionBundleProvider:
 
 
 class BotWiringTests(unittest.TestCase):
-    def _make_temp_root(self, name: str) -> Path:
+
+    @staticmethod
+    def _make_temp_root(name: str) -> Path:
         root = Path(__file__).resolve().parents[1] / name
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
@@ -131,4 +132,3 @@ class BotWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

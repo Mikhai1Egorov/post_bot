@@ -62,6 +62,5 @@ class MarkApprovalBatchNotifiedUseCaseTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "APPROVAL_BATCH_NOT_FOUND")
 
-
 if __name__ == "__main__":
     unittest.main()

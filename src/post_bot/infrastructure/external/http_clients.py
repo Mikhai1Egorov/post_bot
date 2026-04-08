@@ -12,7 +12,6 @@ from post_bot.application.ports import LLMClientPort, PublisherPort, ResearchCli
 from post_bot.domain.models import TaskResearchSource
 from post_bot.shared.errors import ExternalDependencyError
 
-
 def _post_json(
     *,
     url: str,
@@ -288,4 +287,3 @@ class HttpPublisher(PublisherPort):
             )
 
         return external_message_id, payload
-

@@ -12,7 +12,7 @@ from post_bot.application.use_cases.execute_claimed_task import ExecuteClaimedTa
 from post_bot.application.use_cases.publish_task import PublishTaskUseCase  # noqa: E402
 from post_bot.application.use_cases.run_task_generation import RunTaskGenerationUseCase  # noqa: E402
 from post_bot.application.use_cases.run_task_rendering import RunTaskRenderingUseCase  # noqa: E402
-from post_bot.application.use_cases.run_worker_cycle import RunWorkerCycleUseCase  # noqa: E402
+from post_bot.application.use_cases.run_worker_cycle import RunWorkerCycleResult, RunWorkerCycleUseCase  # noqa: E402
 from post_bot.domain.models import BalanceSnapshot, Task  # noqa: E402
 from post_bot.infrastructure.runtime.worker_runtime import WorkerRuntime, WorkerRuntimeCommand  # noqa: E402
 from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
@@ -31,7 +31,37 @@ from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingSta
 from post_bot.shared.errors import BusinessRuleError  # noqa: E402
 
 
+class _AlwaysFailingCycle:
+
+    @staticmethod
+    def execute(command):  # noqa: ANN001
+        _ = command
+        return RunWorkerCycleResult(
+            had_task=False,
+            task_id=None,
+            success=False,
+            final_status=None,
+            error_code="WORKER_CYCLE_UNEXPECTED_ERROR",
+        )
+
+
+class _AlwaysFailingTaskCycle:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        self.calls += 1
+        return RunWorkerCycleResult(
+            had_task=True,
+            task_id=self.calls,
+            success=False,
+            final_status=TaskStatus.FAILED,
+            error_code="WORKER_CYCLE_UNEXPECTED_ERROR",
+        )
+
 class WorkerRuntimeTests(unittest.TestCase):
+
     @staticmethod
     def _resources() -> dict[str, str]:
         return {
@@ -129,6 +159,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(result.tasks_processed, 1)
         self.assertEqual(result.failed_cycles, 0)
         self.assertEqual(result.cycles_executed, 2)
+        self.assertFalse(result.terminated_early)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.DONE)
 
     def test_runtime_counts_failed_cycles(self) -> None:
@@ -141,7 +172,70 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(result.tasks_processed, 1)
         self.assertEqual(result.failed_cycles, 1)
         self.assertEqual(result.cycles_executed, 2)
+        self.assertFalse(result.terminated_early)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
+
+    def test_runtime_counts_failed_cycle_without_task(self) -> None:
+        runtime = WorkerRuntime(
+            run_worker_cycle=_AlwaysFailingCycle(),
+            logger=logging.getLogger("test.runtime.worker.fail_without_task"),
+        )
+
+        result = runtime.run(WorkerRuntimeCommand(worker_id="worker-1", model_name="gpt-test", max_cycles=5))
+
+        self.assertEqual(result.cycles_executed, 1)
+        self.assertEqual(result.tasks_processed, 0)
+        self.assertEqual(result.failed_cycles, 1)
+        self.assertFalse(result.terminated_early)
+
+    def test_runtime_stops_after_max_failed_cycles(self) -> None:
+        runtime = WorkerRuntime(
+            run_worker_cycle=_AlwaysFailingCycle(),
+            logger=logging.getLogger("test.runtime.worker.max_failed"),
+        )
+
+        result = runtime.run(
+            WorkerRuntimeCommand(
+                worker_id="worker-1",
+                model_name="gpt-test",
+                max_cycles=None,
+                max_failed_cycles=1,
+                idle_sleep_seconds=0.25,
+            )
+        )
+
+        self.assertEqual(result.cycles_executed, 1)
+        self.assertEqual(result.tasks_processed, 0)
+        self.assertEqual(result.failed_cycles, 1)
+        self.assertTrue(result.terminated_early)
+
+    def test_unbounded_runtime_sleeps_after_failed_cycle(self) -> None:
+        cycle = _AlwaysFailingTaskCycle()
+        sleep_calls: list[float] = []
+
+        def stop_after_first_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            raise RuntimeError("stop_test_loop")
+
+        runtime = WorkerRuntime(
+            run_worker_cycle=cycle,
+            logger=logging.getLogger("test.runtime.worker.unbounded_failure"),
+            sleep_fn=stop_after_first_sleep,
+        )
+
+        with self.assertRaises(RuntimeError) as context:
+            runtime.run(
+                WorkerRuntimeCommand(
+                    worker_id="worker-1",
+                    model_name="gpt-test",
+                    max_cycles=None,
+                    idle_sleep_seconds=0.25,
+                )
+            )
+
+        self.assertEqual(str(context.exception), "stop_test_loop")
+        self.assertEqual(cycle.calls, 1)
+        self.assertEqual(sleep_calls, [0.25])
 
     def test_runtime_rejects_invalid_max_cycles(self) -> None:
         runtime = self._build_runtime(uow=InMemoryUnitOfWork(), llm=FakeLLMClient(response_text="unused"))
@@ -151,6 +245,13 @@ class WorkerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(context.exception.code, "WORKER_MAX_CYCLES_INVALID")
 
+    def test_runtime_rejects_invalid_max_failed_cycles(self) -> None:
+        runtime = self._build_runtime(uow=InMemoryUnitOfWork(), llm=FakeLLMClient(response_text="unused"))
+
+        with self.assertRaises(BusinessRuleError) as context:
+            runtime.run(WorkerRuntimeCommand(worker_id="worker-1", model_name="gpt-test", max_failed_cycles=0))
+
+        self.assertEqual(context.exception.code, "WORKER_MAX_FAILED_CYCLES_INVALID")
 
 if __name__ == "__main__":
     unittest.main()

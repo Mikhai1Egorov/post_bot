@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -37,7 +37,7 @@ class _FakeWorkerRuntime:
 
     def run(self, command):  # noqa: ANN001
         self.last_command = command
-        return WorkerRuntimeResult(cycles_executed=2, tasks_processed=1, failed_cycles=0)
+        return WorkerRuntimeResult(cycles_executed=2, tasks_processed=1, failed_cycles=0, terminated_early=False)
 
 
 class _FakeMaintenanceRuntime:
@@ -46,7 +46,14 @@ class _FakeMaintenanceRuntime:
 
     def run(self, command):  # noqa: ANN001
         self.last_command = command
-        return MaintenanceRuntimeResult(iterations_executed=1, recovered_total=0, cleanup_deleted_total=0)
+        return MaintenanceRuntimeResult(
+            iterations_executed=1,
+            recovered_total=0,
+            cleanup_deleted_total=0,
+            expired_total=0,
+            failed_iterations=0,
+            terminated_early=False,
+        )
 
 
 class _FakeTelegramRuntime:
@@ -80,6 +87,8 @@ class RuntimeEntrypointsTests(unittest.TestCase):
                     "gpt-test",
                     "--max-cycles",
                     "5",
+                    "--max-failed-cycles",
+                    "3",
                     "--idle-sleep",
                     "0.2",
                 ],
@@ -92,6 +101,7 @@ class RuntimeEntrypointsTests(unittest.TestCase):
         self.assertEqual(fake_runtime.last_command.worker_id, "w-1")
         self.assertEqual(fake_runtime.last_command.model_name, "gpt-test")
         self.assertEqual(fake_runtime.last_command.max_cycles, 5)
+        self.assertEqual(fake_runtime.last_command.max_failed_cycles, 3)
         self.assertEqual(fake_runtime.last_command.idle_sleep_seconds, 0.2)
 
     def test_maintenance_entrypoint_parses_ids_and_runs_runtime(self) -> None:
@@ -113,10 +123,24 @@ class RuntimeEntrypointsTests(unittest.TestCase):
                     "3",
                     "--interval-seconds",
                     "1.5",
+                    "--max-failed-iterations",
+                    "4",
                     "--stale-task-ids",
                     "11,22,33",
+                    "--auto-recover-older-than-minutes",
+                    "45",
+                    "--auto-recover-limit",
+                    "66",
                     "--recover-reason",
                     "MANUAL_RECOVERY",
+                    "--expire-batch-ids",
+                    "44,55",
+                    "--auto-expire-older-than-minutes",
+                    "120",
+                    "--auto-expire-limit",
+                    "77",
+                    "--expire-reason",
+                    "MANUAL_EXPIRY",
                     "--cleanup",
                     "--cleanup-dry-run",
                 ],
@@ -126,12 +150,57 @@ class RuntimeEntrypointsTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIsNotNone(fake_runtime.last_command)
+        self.assertEqual(fake_runtime.last_command.launch_profile, "manual")
         self.assertEqual(fake_runtime.last_command.iterations, 3)
         self.assertEqual(fake_runtime.last_command.interval_seconds, 1.5)
+        self.assertEqual(fake_runtime.last_command.max_failed_iterations, 4)
         self.assertEqual(fake_runtime.last_command.stale_task_ids, (11, 22, 33))
+        self.assertEqual(fake_runtime.last_command.auto_recover_older_than_minutes, 45)
+        self.assertEqual(fake_runtime.last_command.auto_recover_limit, 66)
         self.assertEqual(fake_runtime.last_command.recover_reason_code, "MANUAL_RECOVERY")
+        self.assertEqual(fake_runtime.last_command.expirable_batch_ids, (44, 55))
+        self.assertEqual(fake_runtime.last_command.auto_expire_older_than_minutes, 120)
+        self.assertEqual(fake_runtime.last_command.auto_expire_limit, 77)
+        self.assertEqual(fake_runtime.last_command.expire_reason_code, "MANUAL_EXPIRY")
         self.assertTrue(fake_runtime.last_command.cleanup_non_final_artifacts)
         self.assertTrue(fake_runtime.last_command.cleanup_dry_run)
+
+    def test_maintenance_entrypoint_applies_safe_profile_defaults(self) -> None:
+        from post_bot.infrastructure.runtime import maintenance_entrypoint
+
+        fake_runtime = _FakeMaintenanceRuntime()
+
+        with (
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.AppConfig.from_env", return_value=_config()),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.configure_logging"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_default_runtime_wiring", return_value=object()),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_maintenance_runtime", return_value=fake_runtime),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "post-bot-maintenance",
+                    "--profile",
+                    "safe_periodic",
+                ],
+            ),
+        ):
+            exit_code = maintenance_entrypoint.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNotNone(fake_runtime.last_command)
+        self.assertEqual(fake_runtime.last_command.launch_profile, "safe_periodic")
+        self.assertEqual(fake_runtime.last_command.iterations, 1)
+        self.assertEqual(fake_runtime.last_command.interval_seconds, 0.0)
+        self.assertIsNone(fake_runtime.last_command.max_failed_iterations)
+        self.assertEqual(fake_runtime.last_command.auto_recover_older_than_minutes, 120)
+        self.assertEqual(fake_runtime.last_command.auto_recover_limit, 200)
+        self.assertEqual(fake_runtime.last_command.recover_reason_code, "STALE_TASK_RECOVERY")
+        self.assertEqual(fake_runtime.last_command.auto_expire_older_than_minutes, 1440)
+        self.assertEqual(fake_runtime.last_command.auto_expire_limit, 200)
+        self.assertEqual(fake_runtime.last_command.expire_reason_code, "APPROVAL_BATCH_EXPIRED")
+        self.assertTrue(fake_runtime.last_command.cleanup_non_final_artifacts)
+        self.assertFalse(fake_runtime.last_command.cleanup_dry_run)
 
     def test_bot_entrypoint_parses_args_and_runs_runtime(self) -> None:
         from post_bot.infrastructure.runtime import bot_entrypoint
@@ -171,3 +240,4 @@ class RuntimeEntrypointsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

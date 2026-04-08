@@ -1,4 +1,4 @@
-﻿"""Handle approval mode download action."""
+"""Handle approval mode download action."""
 
 from __future__ import annotations
 
@@ -52,6 +52,18 @@ class DownloadApprovalBatchUseCase:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_ALREADY_PUBLISHED",
                         message="Published approval batch cannot be downloaded.",
+                        details={"batch_id": command.batch_id},
+                    )
+                if batch.batch_status == ApprovalBatchStatus.DOWNLOADED:
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_ALREADY_DOWNLOADED",
+                        message="Approval batch is already downloaded.",
+                        details={"batch_id": command.batch_id},
+                    )
+                if batch.batch_status == ApprovalBatchStatus.EXPIRED:
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_EXPIRED",
+                        message="Expired approval batch cannot be downloaded.",
                         details={"batch_id": command.batch_id},
                     )
                 if batch.zip_artifact_id is None:

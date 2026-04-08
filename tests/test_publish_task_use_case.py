@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import sys
@@ -15,12 +15,15 @@ from post_bot.shared.enums import PublicationStatus, TaskBillingState, TaskStatu
 
 
 class PublishTaskUseCaseTests(unittest.TestCase):
-    def _create_processing_upload(self, uow: InMemoryUnitOfWork) -> int:
+
+    @staticmethod
+    def _create_processing_upload(uow: InMemoryUnitOfWork) -> int:
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
         return upload.id
 
-    def _task(self, *, upload_id: int, status: TaskStatus = TaskStatus.PUBLISHING, mode: str = "instant") -> Task:
+    @staticmethod
+    def _task(*, upload_id: int, status: TaskStatus = TaskStatus.PUBLISHING, mode: str = "instant") -> Task:
         return Task(
             id=1,
             upload_id=upload_id,
@@ -45,7 +48,8 @@ class PublishTaskUseCaseTests(unittest.TestCase):
             retry_count=0,
         )
 
-    def _seed_successful_render(self, uow: InMemoryUnitOfWork, *, task_id: int) -> None:
+    @staticmethod
+    def _seed_successful_render(uow: InMemoryUnitOfWork, *, task_id: int) -> None:
         render = uow.renders.create_started(task_id=task_id)
         uow.renders.mark_succeeded(
             render.id,
@@ -146,7 +150,6 @@ class PublishTaskUseCaseTests(unittest.TestCase):
         self.assertIsNotNone(publication)
         self.assertEqual(publication.publication_status, PublicationStatus.FAILED)
 
-
     def test_publish_retryable_failure_exhausted_attempts_marks_failed(self) -> None:
         uow = InMemoryUnitOfWork()
         upload_id = self._create_processing_upload(uow)
@@ -165,6 +168,7 @@ class PublishTaskUseCaseTests(unittest.TestCase):
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.tasks.tasks[1].retry_count, TASK_MAX_RETRY_ATTEMPTS + 1)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.FAILED)
+
     def test_publish_invalid_task_status_does_not_force_failed(self) -> None:
         uow = InMemoryUnitOfWork()
         upload_id = self._create_processing_upload(uow)

@@ -23,8 +23,8 @@ from post_bot.infrastructure.testing.in_memory import FakeExcelTaskParser, InMem
 from post_bot.pipeline.modules.validation import ExcelContractValidator  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
-
 class TelegramUploadCommandHandlerTests(unittest.TestCase):
+
     @staticmethod
     def _build_handler(
             *,
@@ -134,7 +134,5 @@ class TelegramUploadCommandHandlerTests(unittest.TestCase):
         self.assertEqual(first.user_id, second.user_id)
         self.assertEqual(uow.users.by_id[first.user_id].interface_language, InterfaceLanguage.AR.value)
 
-
 if __name__ == "__main__":
     unittest.main()
-

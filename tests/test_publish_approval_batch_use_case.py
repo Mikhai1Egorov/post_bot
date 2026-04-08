@@ -24,7 +24,9 @@ from post_bot.shared.enums import (  # noqa: E402
 )
 
 class PublishApprovalBatchUseCaseTests(unittest.TestCase):
-    def _task(self, task_id: int, upload_id: int, *, status: TaskStatus = TaskStatus.READY_FOR_APPROVAL) -> Task:
+
+    @staticmethod
+    def _task(task_id: int, upload_id: int, *, status: TaskStatus = TaskStatus.READY_FOR_APPROVAL) -> Task:
         return Task(
             id=task_id,
             upload_id=upload_id,
@@ -49,7 +51,8 @@ class PublishApprovalBatchUseCaseTests(unittest.TestCase):
             retry_count=0,
         )
 
-    def _seed_render(self, uow: InMemoryUnitOfWork, task_id: int) -> None:
+    @staticmethod
+    def _seed_render(uow: InMemoryUnitOfWork, task_id: int) -> None:
         render = uow.renders.create_started(task_id=task_id)
         uow.renders.mark_succeeded(
             render.id,
@@ -133,7 +136,61 @@ class PublishApprovalBatchUseCaseTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "APPROVAL_BATCH_ALREADY_DOWNLOADED")
 
+    def test_publish_approval_batch_rejected_if_published(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+
+        uow.tasks.create_many([self._task(1, upload.id)])
+        self._seed_render(uow, 1)
+
+        batch = uow.approval_batches.create_ready(upload_id=upload.id, user_id=20)
+        uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.PUBLISHED)
+        uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=[1])
+
+        publish_task = PublishTaskUseCase(
+            uow=uow,
+            publisher=FakePublisher(),
+            logger=logging.getLogger("test.publish_task"),
+        )
+        use_case = PublishApprovalBatchUseCase(
+            uow=uow,
+            publish_task_use_case=publish_task,
+            logger=logging.getLogger("test.publish_approval_batch"),
+        )
+
+        result = use_case.execute(PublishApprovalBatchCommand(batch_id=batch.id, user_id=20, changed_by="user"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "APPROVAL_BATCH_ALREADY_PUBLISHED")
+
+    def test_publish_approval_batch_rejected_if_expired(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+
+        uow.tasks.create_many([self._task(1, upload.id)])
+        self._seed_render(uow, 1)
+
+        batch = uow.approval_batches.create_ready(upload_id=upload.id, user_id=20)
+        uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.EXPIRED)
+        uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=[1])
+
+        publish_task = PublishTaskUseCase(
+            uow=uow,
+            publisher=FakePublisher(),
+            logger=logging.getLogger("test.publish_task"),
+        )
+        use_case = PublishApprovalBatchUseCase(
+            uow=uow,
+            publish_task_use_case=publish_task,
+            logger=logging.getLogger("test.publish_approval_batch"),
+        )
+
+        result = use_case.execute(PublishApprovalBatchCommand(batch_id=batch.id, user_id=20, changed_by="user"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "APPROVAL_BATCH_EXPIRED")
 
 if __name__ == "__main__":
     unittest.main()
-

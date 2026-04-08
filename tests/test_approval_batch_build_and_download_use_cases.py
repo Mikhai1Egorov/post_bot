@@ -170,6 +170,52 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].action_type, UserActionType.DOWNLOAD_ARCHIVE_CLICK)
 
+    def test_download_rejected_if_already_downloaded(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
+
+        build = BuildApprovalBatchUseCase(
+            uow=uow,
+            file_storage=storage,
+            artifact_storage=storage,
+            zip_builder=InMemoryZipBuilder(),
+            logger=logging.getLogger("test.approval.build"),
+        )
+        build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload_id))
+        self.assertTrue(build_result.success)
+
+        uow.approval_batches.set_status(build_result.batch_id, ApprovalBatchStatus.DOWNLOADED)
+
+        download = DownloadApprovalBatchUseCase(uow=uow, logger=logging.getLogger("test.approval.download"))
+        result = download.execute(DownloadApprovalBatchCommand(batch_id=build_result.batch_id, user_id=20, changed_by="user"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "APPROVAL_BATCH_ALREADY_DOWNLOADED")
+
+    def test_download_rejected_if_expired(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
+
+        build = BuildApprovalBatchUseCase(
+            uow=uow,
+            file_storage=storage,
+            artifact_storage=storage,
+            zip_builder=InMemoryZipBuilder(),
+            logger=logging.getLogger("test.approval.build"),
+        )
+        build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload_id))
+        self.assertTrue(build_result.success)
+
+        uow.approval_batches.set_status(build_result.batch_id, ApprovalBatchStatus.EXPIRED)
+
+        download = DownloadApprovalBatchUseCase(uow=uow, logger=logging.getLogger("test.approval.download"))
+        result = download.execute(DownloadApprovalBatchCommand(batch_id=build_result.batch_id, user_id=20, changed_by="user"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "APPROVAL_BATCH_EXPIRED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -166,6 +166,19 @@ class RunTaskRenderingUseCase:
                 duration_ms=timer.elapsed_ms(),
             )
 
+        except Exception as error:  # noqa: BLE001
+            internal = InternalError(
+                code="RENDERING_UNEXPECTED_ERROR",
+                message="Unexpected rendering error.",
+                details={"task_id": command.task_id, "error": str(error)},
+            )
+            return self._handle_failure(
+                command=command,
+                render_id=render_id,
+                error=internal,
+                duration_ms=timer.elapsed_ms(),
+            )
+
     def _handle_failure(
         self,
         *,

@@ -13,7 +13,6 @@ from post_bot.bot.handlers.instructions_command import HandleInstructionsCommand
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
-
 class FakeInstructionBundleProvider:
     def __init__(self, bundle: InstructionBundle) -> None:
         self._bundle = bundle
@@ -21,7 +20,6 @@ class FakeInstructionBundleProvider:
     def load_bundle(self, *, interface_language: InterfaceLanguage) -> InstructionBundle:
         _ = interface_language
         return self._bundle
-
 
 class InstructionsCommandHandlerTests(unittest.TestCase):
     def test_handle_returns_files_and_localized_upload_prompt(self) -> None:
@@ -57,4 +55,3 @@ class InstructionsCommandHandlerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
