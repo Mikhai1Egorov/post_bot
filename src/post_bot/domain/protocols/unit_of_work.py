@@ -1,4 +1,4 @@
-﻿"""Unit-of-work protocol to enforce transactional boundaries."""
+"""Unit-of-work protocol to enforce transactional boundaries."""
 
 from __future__ import annotations
 

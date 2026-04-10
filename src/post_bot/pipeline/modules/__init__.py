@@ -1,1 +1,1 @@
-﻿"""Isolated processing modules."""
+"""Isolated processing modules."""

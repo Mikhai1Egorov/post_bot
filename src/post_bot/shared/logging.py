@@ -1,4 +1,4 @@
-﻿"""Structured logging utilities."""
+"""Structured logging utilities."""
 
 from __future__ import annotations
 

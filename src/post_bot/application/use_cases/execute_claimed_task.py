@@ -1,4 +1,4 @@
-﻿"""Execute full pipeline for one already-claimed task."""
+"""Execute full pipeline for one already-claimed task."""
 
 from __future__ import annotations
 

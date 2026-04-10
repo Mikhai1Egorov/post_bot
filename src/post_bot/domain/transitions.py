@@ -1,4 +1,4 @@
-﻿"""Centralized transition guards for stateful entities."""
+"""Centralized transition guards for stateful entities."""
 
 from __future__ import annotations
 

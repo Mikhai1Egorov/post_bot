@@ -1,1 +1,1 @@
-﻿"""Testing infrastructure adapters."""
+"""Testing infrastructure adapters."""

@@ -14,7 +14,7 @@ def make_task_from_config(*, upload_id: int, user_id: int, config: NormalizedTas
         custom_title=config.title,
         keywords_text=config.keywords,
         source_time_range=config.time_range,
-        source_language_code=config.search_language,
+        source_language_code=None,
         response_language_code=config.response_language,
         style_code=config.style,
         content_length_code=config.length,

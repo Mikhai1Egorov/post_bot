@@ -1,4 +1,4 @@
-﻿"""Localized UI strings for Telegram transport layer."""
+"""Localized UI strings for Telegram transport layer."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from post_bot.shared.errors import InternalError, ValidationError
 CATALOG: dict[InterfaceLanguage, dict[str, str]] = {
     InterfaceLanguage.EN: {
         "SYSTEM_READY": "System is ready.",
+        "AVAILABLE_POSTS": "Available posts count: {available}.",
         "SELECT_INTERFACE_LANGUAGE": "Select interface language.",
         "UPLOAD_PROMPT": "Please upload your Excel file.",
         "BUTTON_HOW_TO_USE": "How to use the bot",
@@ -30,6 +31,7 @@ CATALOG: dict[InterfaceLanguage, dict[str, str]] = {
     },
     InterfaceLanguage.RU: {
         "SYSTEM_READY": "Система готова.",
+        "AVAILABLE_POSTS": "\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0435 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u043f\u043e\u0441\u0442\u043e\u0432: {available}.",
         "SELECT_INTERFACE_LANGUAGE": "Выберите язык интерфейса.",
         "UPLOAD_PROMPT": "Пожалуйста, загрузите Excel-файл.",
         "BUTTON_HOW_TO_USE": "Как пользоваться ботом",
@@ -51,6 +53,7 @@ CATALOG: dict[InterfaceLanguage, dict[str, str]] = {
     },
     InterfaceLanguage.UK: {
         "SYSTEM_READY": "Система готова.",
+        "AVAILABLE_POSTS": "Available posts count: {available}.",
         "SELECT_INTERFACE_LANGUAGE": "Оберіть мову інтерфейсу.",
         "UPLOAD_PROMPT": "Будь ласка, завантажте Excel-файл.",
         "BUTTON_HOW_TO_USE": "Як користуватися ботом",
@@ -72,6 +75,7 @@ CATALOG: dict[InterfaceLanguage, dict[str, str]] = {
     },
     InterfaceLanguage.ES: {
         "SYSTEM_READY": "El sistema está listo.",
+        "AVAILABLE_POSTS": "Available posts count: {available}.",
         "SELECT_INTERFACE_LANGUAGE": "Selecciona el idioma de la interfaz.",
         "UPLOAD_PROMPT": "Sube tu archivo Excel.",
         "BUTTON_HOW_TO_USE": "Cómo usar el bot",
@@ -93,6 +97,7 @@ CATALOG: dict[InterfaceLanguage, dict[str, str]] = {
     },
     InterfaceLanguage.ZH: {
         "SYSTEM_READY": "系统已就绪。",
+        "AVAILABLE_POSTS": "Available posts count: {available}.",
         "SELECT_INTERFACE_LANGUAGE": "请选择界面语言。",
         "UPLOAD_PROMPT": "请上传您的 Excel 文件。",
         "BUTTON_HOW_TO_USE": "如何使用机器人",
@@ -114,6 +119,7 @@ CATALOG: dict[InterfaceLanguage, dict[str, str]] = {
     },
     InterfaceLanguage.HI: {
         "SYSTEM_READY": "सिस्टम तैयार है।",
+        "AVAILABLE_POSTS": "Available posts count: {available}.",
         "SELECT_INTERFACE_LANGUAGE": "इंटरफ़ेस भाषा चुनें।",
         "UPLOAD_PROMPT": "कृपया अपनी Excel फ़ाइल अपलोड करें।",
         "BUTTON_HOW_TO_USE": "बॉट का उपयोग कैसे करें",
@@ -135,6 +141,7 @@ CATALOG: dict[InterfaceLanguage, dict[str, str]] = {
     },
     InterfaceLanguage.AR: {
         "SYSTEM_READY": "النظام جاهز.",
+        "AVAILABLE_POSTS": "Available posts count: {available}.",
         "SELECT_INTERFACE_LANGUAGE": "اختر لغة الواجهة.",
         "UPLOAD_PROMPT": "يرجى تحميل ملف Excel الخاص بك.",
         "BUTTON_HOW_TO_USE": "كيفية استخدام البوت",
@@ -184,3 +191,6 @@ def get_message(language: InterfaceLanguage, key: str, **kwargs: object) -> str:
             details={"language": language.value, "key": key},
         )
     return template.format(**kwargs)
+
+
+

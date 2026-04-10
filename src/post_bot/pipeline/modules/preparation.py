@@ -15,7 +15,6 @@ class PreparedTaskPayload:
     title: str
     keywords: str
     time_range: str
-    search_language: str
     response_language: str
     style: str
     length: str
@@ -47,15 +46,12 @@ class PreparationModule:
                     details={"task_id": task.id, "field": field_name},
                 )
 
-        search_language = task.source_language_code or task.response_language_code
-
         return PreparedTaskPayload(
             task_id=task.id,
             topic=task.topic_text,
             title=task.custom_title,
             keywords=task.keywords_text,
             time_range=task.source_time_range,
-            search_language=search_language,
             response_language=task.response_language_code,
             style=task.style_code,
             length=task.content_length_code,
@@ -64,4 +60,3 @@ class PreparationModule:
             footer_link=task.footer_link_url,
             schedule_at_iso=task.scheduled_publish_at.isoformat() if task.scheduled_publish_at else None,
         )
-

@@ -1,1 +1,1 @@
-﻿"""Excel parsing adapters."""
+"""Excel parsing adapters."""

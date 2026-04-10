@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from logging import Logger
 
 from post_bot.application.use_cases.create_tasks import TaskCreationCommand, TaskCreationUseCase
+from post_bot.application.use_cases.release_upload_reservation import (
+    ReleaseUploadReservationCommand,
+    ReleaseUploadReservationUseCase,
+)
 from post_bot.application.use_cases.reserve_balance import ReserveBalanceCommand, ReserveBalanceUseCase
 from post_bot.application.use_cases.upload_intake import UploadIntakeCommand, UploadIntakeUseCase
 from post_bot.application.use_cases.validate_upload import ValidateUploadCommand, ValidateUploadUseCase
@@ -13,11 +17,13 @@ from post_bot.domain.models import UploadValidationErrorItem
 from post_bot.shared.enums import UploadBillingStatus, UploadStatus
 from post_bot.shared.logging import TimedLog, log_event
 
+
 @dataclass(slots=True, frozen=True)
 class StartUploadPipelineCommand:
     user_id: int
     original_filename: str
     payload: bytes
+
 
 @dataclass(slots=True, frozen=True)
 class StartUploadPipelineResult:
@@ -44,12 +50,14 @@ class StartUploadPipelineUseCase:
         validate: ValidateUploadUseCase,
         reserve: ReserveBalanceUseCase,
         create_tasks: TaskCreationUseCase,
+        release_reservation: ReleaseUploadReservationUseCase,
         logger: Logger,
     ) -> None:
         self._intake = intake
         self._validate = validate
         self._reserve = reserve
         self._create_tasks = create_tasks
+        self._release_reservation = release_reservation
         self._logger = logger
 
     def execute(self, command: StartUploadPipelineCommand) -> StartUploadPipelineResult:
@@ -94,9 +102,28 @@ class StartUploadPipelineUseCase:
                 insufficient_by=reserve_result.insufficient_by,
             )
 
-        create_result = self._create_tasks.execute(
-            TaskCreationCommand(upload_id=intake_result.upload_id, normalized_rows=validate_result.normalized_rows)
-        )
+        try:
+            create_result = self._create_tasks.execute(
+                TaskCreationCommand(upload_id=intake_result.upload_id, normalized_rows=validate_result.normalized_rows)
+            )
+        except Exception:  # noqa: BLE001
+            release_result = self._release_reservation.execute(
+                ReleaseUploadReservationCommand(upload_id=intake_result.upload_id)
+            )
+            log_event(
+                self._logger,
+                level=30,
+                module="application.start_upload_pipeline",
+                action="pipeline_failed_after_reserve",
+                result="failure",
+                duration_ms=timer.elapsed_ms(),
+                extra={
+                    "upload_id": intake_result.upload_id,
+                    "release_success": release_result.success,
+                    "release_error_code": release_result.error_code,
+                },
+            )
+            raise
 
         log_event(
             self._logger,

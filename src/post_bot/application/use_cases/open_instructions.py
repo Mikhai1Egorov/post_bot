@@ -1,4 +1,4 @@
-﻿"""Use-case for serving template + README instruction bundle."""
+"""Use-case for serving template + README instruction bundle."""
 
 from __future__ import annotations
 

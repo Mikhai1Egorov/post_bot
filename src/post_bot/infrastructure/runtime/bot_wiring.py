@@ -1,4 +1,4 @@
-﻿"""Runtime composition root for Telegram transport handlers."""
+"""Runtime composition root for Telegram transport handlers."""
 
 from __future__ import annotations
 
@@ -16,9 +16,11 @@ from post_bot.application.use_cases.build_approval_batch import BuildApprovalBat
 from post_bot.application.use_cases.create_tasks import TaskCreationUseCase
 from post_bot.application.use_cases.download_approval_batch import DownloadApprovalBatchUseCase
 from post_bot.application.use_cases.ensure_user import EnsureUserUseCase
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsUseCase
 from post_bot.application.use_cases.open_instructions import OpenInstructionsUseCase
 from post_bot.application.use_cases.publish_approval_batch import PublishApprovalBatchUseCase
 from post_bot.application.use_cases.publish_task import PublishTaskUseCase
+from post_bot.application.use_cases.release_upload_reservation import ReleaseUploadReservationUseCase
 from post_bot.application.use_cases.reserve_balance import ReserveBalanceUseCase
 from post_bot.application.use_cases.start_upload_pipeline import StartUploadPipelineUseCase
 from post_bot.application.use_cases.upload_intake import UploadIntakeUseCase
@@ -30,16 +32,15 @@ from post_bot.bot.handlers.language_selection import LanguageSelectionHandler
 from post_bot.bot.handlers.telegram_upload_command import TelegramUploadCommandHandler
 from post_bot.bot.handlers.upload_command import UploadCommandHandler
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
-from post_bot.infrastructure.db.mysql_uow import build_mysql_uow_from_dsn
+from post_bot.infrastructure.db.mysql_uow import build_mysql_uow
 from post_bot.infrastructure.excel.openpyxl_task_parser import OpenPyxlTaskParser
-from post_bot.infrastructure.external import HttpPublisher
+from post_bot.infrastructure.external import LocalArtifactPublisher, TelegramBotPublisher
 from post_bot.infrastructure.storage.local_file_storage import LocalFileStorage
 from post_bot.infrastructure.storage.local_instruction_bundle_provider import LocalInstructionBundleProvider
 from post_bot.infrastructure.storage.zip_builder import ZipBuilder
 from post_bot.pipeline.modules.validation import ExcelContractValidator
 from post_bot.shared.config import AppConfig
 from post_bot.shared.enums import InterfaceLanguage
-from post_bot.shared.errors import ExternalDependencyError
 
 
 @dataclass(slots=True, frozen=True)
@@ -65,6 +66,11 @@ def build_bot_wiring(
     ensure_user = EnsureUserUseCase(
         uow=uow,
         logger=logger.getChild("ensure_user"),
+    )
+
+    get_available_posts = GetAvailablePostsUseCase(
+        uow=uow,
+        logger=logger.getChild("get_available_posts"),
     )
 
     open_instructions = OpenInstructionsUseCase(
@@ -94,10 +100,14 @@ def build_bot_wiring(
             uow=uow,
             logger=logger.getChild("create_tasks"),
         ),
+        release_reservation=ReleaseUploadReservationUseCase(
+            uow=uow,
+            logger=logger.getChild("release_upload_reservation"),
+        ),
         logger=logger.getChild("start_upload_pipeline"),
     )
 
-    effective_publisher = publisher or _NotConfiguredPublisher()
+    effective_publisher = publisher or LocalArtifactPublisher()
     publish_task_use_case = PublishTaskUseCase(
         uow=uow,
         publisher=effective_publisher,
@@ -125,7 +135,10 @@ def build_bot_wiring(
     return BotWiring(
         uow=uow,
         file_storage=file_storage,
-        language_selection=LanguageSelectionHandler(ensure_user=ensure_user),
+        language_selection=LanguageSelectionHandler(
+            ensure_user=ensure_user,
+            get_available_posts=get_available_posts,
+        ),
         instructions=InstructionsCommandHandler(open_instructions=open_instructions),
         upload=TelegramUploadCommandHandler(
             ensure_user=ensure_user,
@@ -140,13 +153,47 @@ def build_bot_wiring(
     )
 
 
+
+def _build_default_publisher(config: AppConfig) -> PublisherPort:
+    if config.telegram_bot_token:
+        return TelegramBotPublisher(
+            bot_token=config.telegram_bot_token,
+            timeout_seconds=config.outbound_timeout_seconds,
+        )
+    return LocalArtifactPublisher()
+
+
+def _readme_suffixes(language: InterfaceLanguage) -> tuple[str, ...]:
+    if language == InterfaceLanguage.EN:
+        # Support both ENG and EN naming, prefer ENG to match project files.
+        return ("ENG", "EN")
+    return (language.value.upper(),)
+
+
+def _default_readme_candidates(*, project_root: Path, language: InterfaceLanguage) -> tuple[Path, ...]:
+    readme_dir = project_root / "readme"
+    candidates: list[Path] = []
+    for suffix in _readme_suffixes(language):
+        candidates.append(readme_dir / f"README_PIPELINE_{suffix}.txt")
+    candidates.append(project_root / "README_PIPELINE.txt")
+    return tuple(candidates)
+
+
+def _build_default_readme_paths_by_language(*, project_root: Path) -> dict[InterfaceLanguage, Path]:
+    mapping: dict[InterfaceLanguage, Path] = {}
+    for language in InterfaceLanguage:
+        candidates = _default_readme_candidates(project_root=project_root, language=language)
+        selected = next((path for path in candidates if path.exists()), candidates[0])
+        mapping[language] = selected
+    return mapping
+
+
 def build_default_instruction_bundle_provider(*, project_root: str | Path) -> LocalInstructionBundleProvider:
     root = Path(project_root)
     template_path = root / "NEO_TEMPLATE.xlsx"
-    readme_path = root / "README_PIPELINE.txt"
     return LocalInstructionBundleProvider(
         template_path=template_path,
-        readme_paths_by_language={language: readme_path for language in InterfaceLanguage},
+        readme_paths_by_language=_build_default_readme_paths_by_language(project_root=root),
     )
 
 
@@ -162,31 +209,25 @@ def build_default_bot_wiring(
     storage_root = Path(data_dir) if data_dir is not None else root / ".runtime_data"
 
     return build_bot_wiring(
-        uow=build_mysql_uow_from_dsn(config.database_dsn),
+        uow=build_mysql_uow(
+            host=config.db_host,
+            port=config.db_port,
+            user=config.db_user,
+            password=config.db_password,
+            database=config.db_name,
+        ),
         file_storage=LocalFileStorage(storage_root),
         excel_parser=OpenPyxlTaskParser(),
         instruction_bundle_provider=instruction_bundle_provider
         or build_default_instruction_bundle_provider(project_root=root),
         logger=logger,
-        publisher=_build_bot_publisher(config),
+        publisher=_build_default_publisher(config),
     )
 
 
-def _build_bot_publisher(config: AppConfig) -> PublisherPort:
-    if not config.publisher_api_url:
-        return _NotConfiguredPublisher()
-    return HttpPublisher(
-        endpoint_url=config.publisher_api_url,
-        api_token=config.outbound_api_token,
-        timeout_seconds=config.outbound_timeout_seconds,
-    )
 
 
-class _NotConfiguredPublisher:
-    def publish(self, *, channel: str, html: str, scheduled_for):
-        _ = (channel, html, scheduled_for)
-        raise ExternalDependencyError(
-            code="PUBLISHER_NOT_CONFIGURED",
-            message="Publisher adapter is not configured for bot transport runtime.",
-            retryable=False,
-        )
+
+
+
+

@@ -1,4 +1,4 @@
-﻿"""Transport handler for instruction bundle request."""
+"""Transport handler for instruction bundle request."""
 
 from __future__ import annotations
 

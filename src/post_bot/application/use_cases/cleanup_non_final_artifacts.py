@@ -1,4 +1,4 @@
-﻿"""Cleanup job that removes only non-final artifacts."""
+"""Cleanup job that removes only non-final artifacts."""
 
 from __future__ import annotations
 

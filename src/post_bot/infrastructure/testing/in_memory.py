@@ -26,6 +26,7 @@ from post_bot.domain.models import (
     UploadValidationErrorItem,
     UserActionRecord,
 )
+from post_bot.domain.transitions import is_task_final
 from post_bot.shared.enums import (
     ApprovalBatchStatus,
     ArtifactType,
@@ -204,23 +205,37 @@ class InMemoryTaskRepository:
         return tuple(task_id for _, task_id in candidates[:limit])
 
     def claim_next_for_worker(self, worker_id: str) -> Task | None:
+        _ = worker_id
+        now = _utc_now_naive()
+
         for task_id in sorted(self.tasks.keys()):
             task = self.tasks[task_id]
-            if task.task_status == TaskStatus.QUEUED:
+            if task.task_status == TaskStatus.QUEUED and self._is_due_for_processing(task=task, now=now):
                 return task
 
         for task_id in sorted(self.tasks.keys()):
             task = self.tasks[task_id]
-            if task.task_status == TaskStatus.CREATED:
+            if task.task_status == TaskStatus.CREATED and self._is_due_for_processing(task=task, now=now):
                 return task
 
         return None
 
+    @staticmethod
+    def _is_due_for_processing(*, task: Task, now: datetime) -> bool:
+        scheduled = task.scheduled_publish_at
+        if scheduled is None:
+            return True
+        return scheduled <= now
+
     def set_task_status(self, task_id: int, status: TaskStatus, *, changed_by: str, reason: str | None) -> None:
         _ = (changed_by, reason)
         task = self.tasks[task_id]
-        self.tasks[task_id] = replace(task, task_status=status)
-        self.updated_at_by_task_id[task_id] = _utc_now_naive()
+        now = _utc_now_naive()
+        completed_at = task.completed_at
+        if is_task_final(status) and completed_at is None:
+            completed_at = now
+        self.tasks[task_id] = replace(task, task_status=status, completed_at=completed_at)
+        self.updated_at_by_task_id[task_id] = now
 
     def set_task_billing_state(self, task_id: int, billing_state: TaskBillingState) -> None:
         task = self.tasks[task_id]
@@ -357,6 +372,24 @@ class InMemoryRenderRepository:
         self.records: dict[int, TaskRenderRecord] = {}
 
     def create_started(self, *, task_id: int) -> TaskRenderRecord:
+        for render_id in sorted(self.records.keys(), reverse=True):
+            existing = self.records[render_id]
+            if existing.task_id != task_id:
+                continue
+            reset = replace(
+                existing,
+                final_title_text=None,
+                body_html=None,
+                preview_text=None,
+                slug_value=None,
+                html_storage_path=None,
+                render_status=RenderStatus.STARTED,
+                error_code=None,
+                error_message=None,
+            )
+            self.records[render_id] = reset
+            return reset
+
         record = TaskRenderRecord(
             id=self._next_id,
             task_id=task_id,
@@ -370,7 +403,6 @@ class InMemoryRenderRepository:
         self.records[self._next_id] = record
         self._next_id += 1
         return record
-
     def mark_succeeded(
         self,
         render_id: int,
@@ -379,7 +411,7 @@ class InMemoryRenderRepository:
         body_html: str,
         preview_text: str,
         slug_value: str,
-        html_storage_path: str,
+        html_storage_path: str | None,
     ) -> None:
         record = self.records[render_id]
         self.records[render_id] = replace(
@@ -766,6 +798,49 @@ class FakeLLMClient:
         return self._response_text or "generated"
 
 
+
+class FakeImageClient:
+    def __init__(
+        self,
+        *,
+        mime_type: str = "image/png",
+        content: bytes | None = None,
+        error: Exception | None = None,
+        image_url: str | None = None,
+    ) -> None:
+        self._mime_type = mime_type
+        self._content = content if content is not None else b"fake-image"
+        self._error = error
+        self._image_url = image_url
+        self.calls: list[dict[str, object]] = []
+
+    def generate_cover(
+        self,
+        *,
+        task_id: int,
+        article_title: str,
+        article_topic: str,
+        article_lead: str | None,
+    ):
+        self.calls.append(
+            {
+                "task_id": task_id,
+                "article_title": article_title,
+                "article_topic": article_topic,
+                "article_lead": article_lead,
+            }
+        )
+        if self._error is not None:
+            raise self._error
+
+        from post_bot.application.ports import GeneratedImageAsset
+
+        return GeneratedImageAsset(
+            mime_type=self._mime_type if self._image_url is None else None,
+            content=self._content if self._image_url is None else None,
+            prompt_text=f"title={article_title};topic={article_topic}",
+            image_url=self._image_url,
+        )
 class FakePublisher:
     def __init__(
         self,
@@ -809,7 +884,6 @@ class FakeResearchClient:
         topic: str,
         keywords: str,
         time_range: str,
-        search_language: str,
     ) -> list[TaskResearchSource]:
         if self._error is not None:
             raise self._error
@@ -835,10 +909,6 @@ class InMemoryPromptLoader:
 
     def load(self, resource_name: str) -> str:
         return self._resources[resource_name]
-
-
-
-
 
 
 

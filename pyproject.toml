@@ -1,4 +1,4 @@
-﻿[build-system]
+[build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Telegram Excel content pipeline"
 readme = "README_PIPELINE.txt"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "mysql-connector-python>=8.0",
+    "openpyxl>=3.1",
+]
 
 [project.scripts]
 post-bot-worker = "post_bot.infrastructure.runtime.worker_entrypoint:main"

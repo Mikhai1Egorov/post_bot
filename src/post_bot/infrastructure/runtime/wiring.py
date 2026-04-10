@@ -8,6 +8,7 @@ from pathlib import Path
 
 from post_bot.application.ports import (
     ArtifactStoragePort,
+    ImageClientPort,
     LLMClientPort,
     PromptResourceLoaderPort,
     PublisherPort,
@@ -27,8 +28,14 @@ from post_bot.application.use_cases.select_expirable_approval_batches import Sel
 from post_bot.application.use_cases.select_recoverable_stale_tasks import SelectRecoverableStaleTasksUseCase
 from post_bot.domain.models import TaskResearchSource
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
-from post_bot.infrastructure.db.mysql_uow import build_mysql_uow_from_dsn
-from post_bot.infrastructure.external import HttpLLMClient, HttpPublisher, HttpResearchClient
+from post_bot.infrastructure.db.mysql_uow import build_mysql_uow
+from post_bot.infrastructure.external import (
+    LocalArtifactPublisher,
+    OpenAIImageClient,
+    OpenAILLMClient,
+    OpenAIResearchClient,
+    TelegramBotPublisher,
+)
 from post_bot.infrastructure.prompt.file_prompt_loader import FilePromptResourceLoader
 from post_bot.infrastructure.runtime.maintenance_runtime import MaintenanceRuntime
 from post_bot.infrastructure.runtime.worker_runtime import WorkerRuntime
@@ -42,7 +49,7 @@ from post_bot.shared.errors import ExternalDependencyError
 
 
 class UnconfiguredResearchClient:
-    """Explicitly fails when research adapter is not configured."""
+    """Explicitly fails when OpenAI token is not configured."""
 
     def collect(
         self,
@@ -50,42 +57,42 @@ class UnconfiguredResearchClient:
         topic: str,
         keywords: str,
         time_range: str,
-        search_language: str,
     ) -> list[TaskResearchSource]:
-        _ = (topic, keywords, time_range, search_language)
+        _ = (topic, keywords, time_range)
         raise ExternalDependencyError(
-            code="RESEARCH_CLIENT_NOT_CONFIGURED",
-            message="Research adapter is not configured.",
+            code="OPENAI_API_KEY_REQUIRED",
+            message="OPENAI_API_KEY is required for research stage.",
             retryable=False,
         )
 
 
 class UnconfiguredLLMClient:
-    """Explicitly fails when LLM adapter is not configured."""
+    """Explicitly fails when OpenAI token is not configured."""
 
     def generate(self, *, model_name: str, prompt: str, response_language: str) -> str:
         _ = (model_name, prompt, response_language)
         raise ExternalDependencyError(
-            code="LLM_CLIENT_NOT_CONFIGURED",
-            message="LLM adapter is not configured.",
+            code="OPENAI_API_KEY_REQUIRED",
+            message="OPENAI_API_KEY is required for generation stage.",
             retryable=False,
         )
 
 
-class UnconfiguredPublisher:
-    """Explicitly fails when publishing adapter is not configured."""
+class UnconfiguredImageClient:
+    """Explicitly fails when OpenAI token is not configured."""
 
-    def publish(
+    def generate_cover(
         self,
         *,
-        channel: str,
-        html: str,
-        scheduled_for,
-    ) -> tuple[str | None, dict[str, object] | None]:
-        _ = (channel, html, scheduled_for)
+        task_id: int,
+        article_title: str,
+        article_topic: str,
+        article_lead: str | None,
+    ):
+        _ = (task_id, article_title, article_topic, article_lead)
         raise ExternalDependencyError(
-            code="PUBLISHER_NOT_CONFIGURED",
-            message="Publisher adapter is not configured.",
+            code="OPENAI_API_KEY_REQUIRED",
+            message="OPENAI_API_KEY is required for image generation stage.",
             retryable=False,
         )
 
@@ -99,6 +106,7 @@ class RuntimeWiring:
     prompt_loader: PromptResourceLoaderPort
     research_client: ResearchClientPort
     llm_client: LLMClientPort
+    image_client: ImageClientPort
     publisher: PublisherPort
 
 
@@ -109,49 +117,65 @@ def build_default_runtime_wiring(
     data_dir: str | Path | None = None,
     research_client: ResearchClientPort | None = None,
     llm_client: LLMClientPort | None = None,
+    image_client: ImageClientPort | None = None,
     publisher: PublisherPort | None = None,
 ) -> RuntimeWiring:
     root = Path(project_root)
     storage_root = Path(data_dir) if data_dir is not None else root / ".runtime_data"
 
     return RuntimeWiring(
-        uow=build_mysql_uow_from_dsn(config.database_dsn),
+        uow=build_mysql_uow(
+            host=config.db_host,
+            port=config.db_port,
+            user=config.db_user,
+            password=config.db_password,
+            database=config.db_name,
+        ),
         artifact_storage=LocalFileStorage(storage_root),
         prompt_loader=FilePromptResourceLoader(root),
         research_client=research_client or _build_research_client(config),
         llm_client=llm_client or _build_llm_client(config),
+        image_client=image_client or _build_image_client(config),
         publisher=publisher or _build_publisher(config),
     )
 
 
 def _build_research_client(config: AppConfig) -> ResearchClientPort:
-    if not config.research_api_url:
+    if not config.openai_api_key:
         return UnconfiguredResearchClient()
-    return HttpResearchClient(
-        endpoint_url=config.research_api_url,
-        api_token=config.outbound_api_token,
+    return OpenAIResearchClient(
+        api_key=config.openai_api_key,
+        model_name=config.openai_research_model,
         timeout_seconds=config.outbound_timeout_seconds,
     )
 
 
 def _build_llm_client(config: AppConfig) -> LLMClientPort:
-    if not config.llm_api_url:
+    if not config.openai_api_key:
         return UnconfiguredLLMClient()
-    return HttpLLMClient(
-        endpoint_url=config.llm_api_url,
-        api_token=config.outbound_api_token,
+    return OpenAILLMClient(
+        api_key=config.openai_api_key,
+        timeout_seconds=config.outbound_timeout_seconds,
+    )
+
+
+def _build_image_client(config: AppConfig) -> ImageClientPort:
+    if not config.openai_api_key:
+        return UnconfiguredImageClient()
+    return OpenAIImageClient(
+        api_key=config.openai_api_key,
+        model_name=config.openai_image_model,
         timeout_seconds=config.outbound_timeout_seconds,
     )
 
 
 def _build_publisher(config: AppConfig) -> PublisherPort:
-    if not config.publisher_api_url:
-        return UnconfiguredPublisher()
-    return HttpPublisher(
-        endpoint_url=config.publisher_api_url,
-        api_token=config.outbound_api_token,
-        timeout_seconds=config.outbound_timeout_seconds,
-    )
+    if config.telegram_bot_token:
+        return TelegramBotPublisher(
+            bot_token=config.telegram_bot_token,
+            timeout_seconds=config.outbound_timeout_seconds,
+        )
+    return LocalArtifactPublisher()
 
 
 def build_worker_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> WorkerRuntime:
@@ -167,6 +191,7 @@ def build_worker_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> Wo
         uow=wiring.uow,
         artifact_storage=wiring.artifact_storage,
         post_processing=PostProcessingModule(),
+        image_client=wiring.image_client,
         logger=logger.getChild("rendering"),
     )
     publish = PublishTaskUseCase(
@@ -181,10 +206,12 @@ def build_worker_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> Wo
         logger=logger.getChild("execute"),
     )
     claim = ClaimNextTaskUseCase(uow=wiring.uow, logger=logger.getChild("claim"))
+    recover_stale = RecoverStaleTasksUseCase(uow=wiring.uow, logger=logger.getChild("recover_stale_tasks"))
     cycle = RunWorkerCycleUseCase(
         claim_next_task=claim,
         execute_claimed_task=execute,
         logger=logger.getChild("cycle"),
+        recover_stale_tasks=recover_stale,
     )
     return WorkerRuntime(run_worker_cycle=cycle, logger=logger)
 

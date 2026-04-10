@@ -1,8 +1,9 @@
-﻿"""Telegram HTTP gateway adapter."""
+"""Telegram HTTP gateway adapter."""
 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -30,7 +31,13 @@ class TelegramHttpGateway:
         if offset is not None:
             payload["offset"] = offset
 
-        result = self._request_json("getUpdates", payload)
+        request_timeout_seconds = max(self._timeout_seconds, float(timeout_seconds) + 5.0)
+        result = self._request_json(
+            "getUpdates",
+            payload,
+            max_attempts=2,
+            request_timeout_seconds=request_timeout_seconds,
+        )
         if not isinstance(result, list):
             raise ExternalDependencyError(
                 code="TELEGRAM_UPDATES_INVALID_RESPONSE",
@@ -45,19 +52,24 @@ class TelegramHttpGateway:
                 normalized.append(item)
         return normalized
 
-    def send_message(self, *, chat_id: int, text: str, reply_markup: dict[str, object] | None = None) -> None:
+    def send_message(self, *, chat_id: int | str, text: str, reply_markup: dict[str, object] | None = None) -> None:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "text": text,
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        self._request_json("sendMessage", payload)
+        self._request_json(
+            "sendMessage",
+            payload,
+            max_attempts=1,
+            request_timeout_seconds=max(1.0, min(self._timeout_seconds, 5.0)),
+        )
 
     def send_document(
         self,
         *,
-        chat_id: int,
+        chat_id: int | str,
         file_name: str,
         payload: bytes,
         caption: str | None = None,
@@ -80,10 +92,19 @@ class TelegramHttpGateway:
             method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
-        self._open_and_parse(request)
+        self._open_and_parse(
+            request,
+            max_attempts=1,
+            request_timeout_seconds=max(1.0, min(self._timeout_seconds, 7.0)),
+        )
 
     def download_file(self, *, file_id: str, fallback_file_name: str | None = None) -> TelegramDownloadedFile:
-        result = self._request_json("getFile", {"file_id": file_id})
+        result = self._request_json(
+            "getFile",
+            {"file_id": file_id},
+            max_attempts=2,
+            request_timeout_seconds=self._timeout_seconds,
+        )
         if not isinstance(result, dict):
             raise ExternalDependencyError(
                 code="TELEGRAM_GET_FILE_INVALID_RESPONSE",
@@ -101,15 +122,31 @@ class TelegramHttpGateway:
             )
 
         file_request = Request(url=f"{self._file_base}/{file_path}", method="GET")
-        payload = self._open_raw(file_request)
+        payload = self._open_raw(
+            file_request,
+            max_attempts=2,
+            request_timeout_seconds=self._timeout_seconds,
+        )
         derived_name = PurePosixPath(file_path).name
         file_name = fallback_file_name or derived_name or "upload.xlsx"
         return TelegramDownloadedFile(file_name=file_name, payload=payload)
 
     def answer_callback_query(self, *, callback_query_id: str) -> None:
-        self._request_json("answerCallbackQuery", {"callback_query_id": callback_query_id})
+        self._request_json(
+            "answerCallbackQuery",
+            {"callback_query_id": callback_query_id},
+            max_attempts=1,
+            request_timeout_seconds=max(1.0, min(self._timeout_seconds, 5.0)),
+        )
 
-    def _request_json(self, method: str, payload: dict[str, Any]) -> Any:
+    def _request_json(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        *,
+        max_attempts: int,
+        request_timeout_seconds: float,
+    ) -> Any:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
             url=f"{self._api_base}/{method}",
@@ -117,7 +154,11 @@ class TelegramHttpGateway:
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-        response_data = self._open_and_parse(request)
+        response_data = self._open_and_parse(
+            request,
+            max_attempts=max_attempts,
+            request_timeout_seconds=request_timeout_seconds,
+        )
         if not isinstance(response_data, dict):
             raise ExternalDependencyError(
                 code="TELEGRAM_RESPONSE_INVALID",
@@ -136,8 +177,18 @@ class TelegramHttpGateway:
 
         return response_data.get("result")
 
-    def _open_and_parse(self, request: Request) -> Any:
-        raw = self._open_raw(request)
+    def _open_and_parse(
+        self,
+        request: Request,
+        *,
+        max_attempts: int,
+        request_timeout_seconds: float,
+    ) -> Any:
+        raw = self._open_raw(
+            request,
+            max_attempts=max_attempts,
+            request_timeout_seconds=request_timeout_seconds,
+        )
         try:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -147,30 +198,127 @@ class TelegramHttpGateway:
                 retryable=False,
             ) from exc
 
-    def _open_raw(self, request: Request) -> bytes:
+    def _open_raw(
+        self,
+        request: Request,
+        *,
+        max_attempts: int,
+        request_timeout_seconds: float,
+    ) -> bytes:
+        is_get_updates = str(getattr(request, "full_url", "")).endswith("/getUpdates")
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with urlopen(request, timeout=request_timeout_seconds) as response:
+                    return response.read()
+            except HTTPError as exc:
+                status = int(getattr(exc, "code", 0) or 0)
+                reason = str(getattr(exc, "reason", ""))
+                body = self._read_http_error_body(exc)
+                retry_after_seconds = self._read_retry_after_seconds(exc)
+
+                if status == 409 and is_get_updates:
+                    raise ExternalDependencyError(
+                        code="TELEGRAM_POLLING_CONFLICT",
+                        message="Telegram getUpdates conflict: another bot instance is already polling.",
+                        details={
+                            "status": status,
+                            "reason": reason,
+                            "body": body[:1000] if body else None,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                        },
+                        retryable=False,
+                    ) from exc
+
+                retryable = status == 429 or status >= 500
+                if retryable and attempt < max_attempts:
+                    time.sleep(self._retry_delay_seconds(attempt=attempt, retry_after_seconds=retry_after_seconds))
+                    continue
+
+                raise ExternalDependencyError(
+                    code="TELEGRAM_HTTP_ERROR",
+                    message="Telegram HTTP request failed.",
+                    details={
+                        "status": status,
+                        "reason": reason,
+                        "body": body[:1000] if body else None,
+                        "retry_after_seconds": retry_after_seconds,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                    },
+                    retryable=retryable,
+                ) from exc
+            except URLError as exc:
+                reason = str(getattr(exc, "reason", str(exc)))
+                if attempt < max_attempts:
+                    time.sleep(self._retry_delay_seconds(attempt=attempt, retry_after_seconds=None))
+                    continue
+                raise ExternalDependencyError(
+                    code="TELEGRAM_NETWORK_ERROR",
+                    message="Telegram network request failed.",
+                    details={"reason": reason, "attempt": attempt, "max_attempts": max_attempts},
+                    retryable=True,
+                ) from exc
+            except TimeoutError as exc:
+                if attempt < max_attempts:
+                    time.sleep(self._retry_delay_seconds(attempt=attempt, retry_after_seconds=None))
+                    continue
+                raise ExternalDependencyError(
+                    code="TELEGRAM_TIMEOUT",
+                    message="Telegram request timed out.",
+                    details={"reason": str(exc), "attempt": attempt, "max_attempts": max_attempts},
+                    retryable=True,
+                ) from exc
+
+        raise ExternalDependencyError(
+            code="TELEGRAM_NETWORK_ERROR",
+            message="Telegram network request failed.",
+            details={
+                "reason": "request attempts exhausted",
+                "max_attempts": max_attempts,
+                "timeout_seconds": request_timeout_seconds,
+            },
+            retryable=True,
+        )
+
+    @staticmethod
+    def _read_http_error_body(error: HTTPError) -> str:
         try:
-            with urlopen(request, timeout=self._timeout_seconds) as response:
-                return response.read()
-        except HTTPError as exc:
-            raise ExternalDependencyError(
-                code="TELEGRAM_HTTP_ERROR",
-                message="Telegram HTTP request failed.",
-                details={"status": exc.code, "reason": str(exc.reason)},
-                retryable=True,
-            ) from exc
-        except URLError as exc:
-            raise ExternalDependencyError(
-                code="TELEGRAM_NETWORK_ERROR",
-                message="Telegram network request failed.",
-                details={"reason": str(exc.reason)},
-                retryable=True,
-            ) from exc
-        except TimeoutError as exc:
-            raise ExternalDependencyError(
-                code="TELEGRAM_TIMEOUT",
-                message="Telegram request timed out.",
-                retryable=True,
-            ) from exc
+            payload = error.read()
+        except Exception:  # noqa: BLE001
+            return ""
+        if not payload:
+            return ""
+        try:
+            return payload.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _read_retry_after_seconds(error: HTTPError) -> float | None:
+        headers = getattr(error, "headers", None)
+        if headers is None:
+            return None
+        try:
+            raw_value = headers.get("Retry-After")
+        except Exception:  # noqa: BLE001
+            return None
+        if raw_value is None:
+            return None
+        try:
+            parsed = float(str(raw_value).strip())
+        except ValueError:
+            return None
+        if parsed <= 0:
+            return None
+        return min(parsed, 10.0)
+
+    @staticmethod
+    def _retry_delay_seconds(*, attempt: int, retry_after_seconds: float | None) -> float:
+        if retry_after_seconds is not None:
+            return retry_after_seconds
+        return min(2.0, 0.5 * attempt)
 
 
 def _encode_multipart(
@@ -199,3 +347,5 @@ def _encode_multipart(
 
     chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
     return b"".join(chunks)
+
+

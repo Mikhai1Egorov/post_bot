@@ -1,4 +1,4 @@
-﻿"""Prompt loader that reads canonical resources from workspace files."""
+"""Prompt loader that reads canonical resources from workspace files."""
 
 from __future__ import annotations
 

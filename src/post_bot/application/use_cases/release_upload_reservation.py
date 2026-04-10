@@ -1,4 +1,4 @@
-﻿"""Release reserved upload balance before processing start."""
+"""Release reserved upload balance before processing start."""
 
 from __future__ import annotations
 

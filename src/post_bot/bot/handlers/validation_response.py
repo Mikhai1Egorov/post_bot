@@ -1,4 +1,4 @@
-﻿"""Localized transport formatter for validation summary."""
+"""Localized transport formatter for validation summary."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""Shared error hierarchy with explicit codes."""
+"""Shared error hierarchy with explicit codes."""
 
 from __future__ import annotations
 

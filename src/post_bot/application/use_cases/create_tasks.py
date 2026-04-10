@@ -1,4 +1,4 @@
-﻿"""Task creation use-case."""
+"""Task creation use-case."""
 
 from __future__ import annotations
 

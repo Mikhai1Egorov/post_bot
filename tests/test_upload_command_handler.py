@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from post_bot.application.use_cases.create_tasks import TaskCreationUseCase  # noqa: E402
+from post_bot.application.use_cases.release_upload_reservation import ReleaseUploadReservationUseCase  # noqa: E402
 from post_bot.application.use_cases.reserve_balance import ReserveBalanceUseCase  # noqa: E402
 from post_bot.application.use_cases.start_upload_pipeline import StartUploadPipelineUseCase  # noqa: E402
 from post_bot.application.use_cases.upload_intake import UploadIntakeUseCase  # noqa: E402
@@ -17,6 +18,7 @@ from post_bot.domain.models import BalanceSnapshot, ParsedExcelData, ParsedExcel
 from post_bot.infrastructure.testing.in_memory import FakeExcelTaskParser, InMemoryFileStorage, InMemoryUnitOfWork  # noqa: E402
 from post_bot.pipeline.modules.validation import ExcelContractValidator  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
+
 
 class UploadCommandHandlerTests(unittest.TestCase):
 
@@ -34,6 +36,10 @@ class UploadCommandHandlerTests(unittest.TestCase):
             ),
             reserve=ReserveBalanceUseCase(uow=uow, logger=logging.getLogger("test.upload.reserve")),
             create_tasks=TaskCreationUseCase(uow=uow, logger=logging.getLogger("test.upload.create")),
+            release_reservation=ReleaseUploadReservationUseCase(
+                uow=uow,
+                logger=logging.getLogger("test.upload.release"),
+            ),
             logger=logging.getLogger("test.upload.start"),
         )
         return UploadCommandHandler(start_upload_pipeline=start_pipeline)
@@ -146,6 +152,7 @@ class UploadCommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "insufficient_balance")
         self.assertIn("Required: 1. Available: 0.", result.response_text)
+
 
 if __name__ == "__main__":
     unittest.main()

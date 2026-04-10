@@ -1,4 +1,4 @@
-﻿"""Research stage module."""
+"""Research stage module."""
 
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ class ResearchModule:
             topic=payload.topic,
             keywords=payload.keywords,
             time_range=payload.time_range,
-            search_language=payload.search_language,
         )
         normalized_sources: list[TaskResearchSource] = []
         lines: list[str] = []
@@ -43,9 +42,7 @@ class ResearchModule:
             )
             normalized_sources.append(normalized)
             title = normalized.source_title or "(untitled)"
-            lang = normalized.source_language_code or "unknown"
-            lines.append(f"{index}. {title} [{lang}] {normalized.source_url}")
+            lines.append(f"{index}. {title} {normalized.source_url}")
 
         context = "\n".join(lines) if lines else None
         return ResearchResult(sources=tuple(normalized_sources), context_text=context)
-

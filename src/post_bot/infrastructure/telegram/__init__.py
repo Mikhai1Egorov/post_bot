@@ -1,4 +1,4 @@
-﻿"""Telegram infrastructure adapters."""
+"""Telegram infrastructure adapters."""
 
 from post_bot.infrastructure.telegram.http_gateway import TelegramHttpGateway
 

@@ -24,6 +24,7 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
     InMemoryFileStorage,
     InMemoryUnitOfWork,
 )
+from post_bot.shared.errors import AppError, BusinessRuleError, ValidationError  # noqa: E402
 from post_bot.shared.enums import (  # noqa: E402
     ApprovalBatchStatus,
     ArtifactType,
@@ -48,6 +49,10 @@ class FakeInstructionBundleProvider:
             readme_bytes=b"readme",
         )
 
+class _FailingExcelTaskParser:
+    def parse(self, payload: bytes):  # noqa: ANN001
+        _ = payload
+        raise ValidationError(code="EXCEL_HEADER_EMPTY", message="Excel header contains empty column names.", details={"empty_cells": ["B1", "D1"], "empty_columns": [2, 4]})
 class FakeTelegramGateway:
     def __init__(self, updates: list[dict], files: dict[str, TelegramDownloadedFile]) -> None:
         self._updates = list(updates)
@@ -86,6 +91,36 @@ class FakeTelegramGateway:
     def answer_callback_query(self, *, callback_query_id: str) -> None:
         self.answered_callbacks.append(callback_query_id)
 
+
+
+class TimeoutTelegramGateway(FakeTelegramGateway):
+    def __init__(self) -> None:
+        super().__init__(updates=[], files={})
+        self.calls = 0
+
+    def get_updates(self, *, offset: int | None, timeout_seconds: int) -> list[dict]:
+        _ = (offset, timeout_seconds)
+        self.calls += 1
+        raise AppError(
+            code="TELEGRAM_TIMEOUT",
+            message="Telegram request timed out.",
+            retryable=True,
+        )
+
+class ExpiredCallbackTelegramGateway(FakeTelegramGateway):
+    def answer_callback_query(self, *, callback_query_id: str) -> None:
+        _ = callback_query_id
+        raise AppError(
+            code="TELEGRAM_HTTP_ERROR",
+            message="Telegram HTTP request failed.",
+            details={
+                "status": 400,
+                "reason": "Bad Request",
+                "body": '{"ok":false,"error_code":400,"description":"Bad Request: query is too old and response timeout expired or query ID is invalid"}',
+            },
+            retryable=False,
+        )
+
 class TelegramRuntimeTests(unittest.TestCase):
 
     @staticmethod
@@ -95,8 +130,9 @@ class TelegramRuntimeTests(unittest.TestCase):
         uow: InMemoryUnitOfWork,
         storage: InMemoryFileStorage | None = None,
         publisher: FakePublisher | None = None,
+        excel_parser: object | None = None,
     ) -> TelegramPollingRuntime:
-        parser = FakeExcelTaskParser(
+        parser = excel_parser or FakeExcelTaskParser(
             ParsedExcelData(
                 headers=("channel", "topic", "keywords", "time_range", "response_language", "mode"),
                 rows=(
@@ -315,7 +351,7 @@ class TelegramRuntimeTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(gateway.sent_messages), 3)
         self.assertTrue(any("Select interface language" in item["text"] for item in gateway.sent_messages))
-        self.assertTrue(any("System is ready." in item["text"] for item in gateway.sent_messages))
+        self.assertTrue(any("Available posts count: 5." in item["text"] for item in gateway.sent_messages))
         self.assertTrue(any("Processing has started." in item["text"] for item in gateway.sent_messages))
 
         self.assertEqual(len(gateway.sent_documents), 2)
@@ -350,6 +386,51 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(len(gateway.sent_documents), 0)
         self.assertEqual(len(gateway.sent_messages), 1)
         self.assertIn("Select interface language", gateway.sent_messages[0]["text"])
+
+    def test_language_keyboard_contains_flags_for_all_languages(self) -> None:
+        keyboard = TelegramPollingRuntime._language_keyboard()
+        rows = keyboard["inline_keyboard"]
+        labels = [button["text"] for row in rows for button in row]
+
+        self.assertIn("\U0001F1EC\U0001F1E7 English", labels)
+        self.assertIn("\U0001F1F7\U0001F1FA Russian", labels)
+        self.assertIn("\U0001F1FA\U0001F1E6 Ukrainian", labels)
+        self.assertIn("\U0001F1EA\U0001F1F8 Spanish", labels)
+        self.assertIn("\U0001F1E8\U0001F1F3 Chinese", labels)
+        self.assertIn("\U0001F1EE\U0001F1F3 Hindi", labels)
+        self.assertIn("\U0001F1F8\U0001F1E6 Arabic", labels)
+
+    def test_action_keyboard_places_buttons_in_separate_rows(self) -> None:
+        keyboard = TelegramPollingRuntime._action_keyboard(InterfaceLanguage.RU)
+        rows = keyboard["inline_keyboard"]
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows[0]), 1)
+        self.assertEqual(len(rows[1]), 1)
+        self.assertEqual(rows[0][0]["callback_data"], "instructions")
+        self.assertEqual(rows[1][0]["callback_data"], "upload")
+
+    def test_ignores_expired_callback_answer_error_and_processes_language_selection(self) -> None:
+        updates = [
+            {
+                "update_id": 21,
+                "callback_query": {
+                    "id": "cb-expired",
+                    "from": {"id": 902},
+                    "message": {"message_id": 41, "chat": {"id": 902}},
+                    "data": "lang:en",
+                },
+            }
+        ]
+        gateway = ExpiredCallbackTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertTrue(any("Available posts count: 0." in item["text"] for item in gateway.sent_messages))
 
     def test_dispatches_approval_ready_notification_once_per_runtime(self) -> None:
         storage = InMemoryFileStorage()
@@ -476,5 +557,168 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(publication)
         self.assertEqual(publication.publication_status, PublicationStatus.PUBLISHED)
 
+    def test_upload_parse_error_sends_localized_failure_message(self) -> None:
+        updates = [
+            {
+                "update_id": 410,
+                "message": {
+                    "message_id": 41,
+                    "from": {"id": 741},
+                    "chat": {"id": 741},
+                    "document": {"file_id": "file-bad", "file_name": "tasks.xlsx"},
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(
+            updates=updates,
+            files={"file-bad": TelegramDownloadedFile(file_name="tasks.xlsx", payload=b"bad")},
+        )
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=741, interface_language=InterfaceLanguage.EN)
+
+        runtime = self._build_runtime(
+            gateway=gateway,
+            uow=uow,
+            excel_parser=_FailingExcelTaskParser(),
+        )
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(len(gateway.sent_messages), 1)
+        self.assertIn("Validation failed.", gateway.sent_messages[0]["text"])
+        self.assertIn("Row 1:", gateway.sent_messages[0]["text"])
+        self.assertIn("B1", gateway.sent_messages[0]["text"])
+        self.assertIn("D1", gateway.sent_messages[0]["text"])
+    def test_stops_after_max_failed_cycles(self) -> None:
+        updates = [
+            {
+                "update_id": 500,
+                "callback_query": {
+                    "id": "cb-bad",
+                    "from": {"id": 750},
+                    "message": {"message_id": 4, "chat": {"id": 750}},
+                    "data": "approval_download:not-an-int",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=750, interface_language=InterfaceLanguage.EN)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=None,
+                max_failed_cycles=1,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+            )
+        )
+
+        self.assertEqual(result.cycles_executed, 1)
+        self.assertEqual(result.updates_failed, 1)
+        self.assertEqual(result.failed_cycles, 1)
+        self.assertTrue(result.terminated_early)
+        self.assertEqual(result.next_offset, 501)
+        self.assertEqual(gateway.answered_callbacks, ["cb-bad"])
+        self.assertEqual(len(gateway.sent_messages), 1)
+        self.assertIn("Action failed (TELEGRAM_APPROVAL_BATCH_ID_INVALID).", gateway.sent_messages[0]["text"])
+
+    def test_get_updates_timeout_is_treated_as_idle_wait(self) -> None:
+        gateway = TimeoutTelegramGateway()
+        uow = InMemoryUnitOfWork()
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+
+        result = runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=2,
+                max_failed_cycles=1,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+            )
+        )
+
+        self.assertEqual(gateway.calls, 2)
+        self.assertEqual(result.cycles_executed, 2)
+        self.assertEqual(result.updates_processed, 0)
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.failed_cycles, 0)
+        self.assertFalse(result.terminated_early)
+
+    def test_rejects_invalid_max_failed_cycles(self) -> None:
+        gateway = FakeTelegramGateway(updates=[], files={})
+        uow = InMemoryUnitOfWork()
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+
+        with self.assertRaises(BusinessRuleError) as context:
+            runtime.run(
+                TelegramRuntimeCommand(
+                    max_cycles=1,
+                    max_failed_cycles=0,
+                    poll_timeout_seconds=1,
+                    idle_sleep_seconds=0.0,
+                )
+            )
+
+        self.assertEqual(context.exception.code, "TELEGRAM_MAX_FAILED_CYCLES_INVALID")
+
+    def test_rejects_invalid_max_cycles(self) -> None:
+        gateway = FakeTelegramGateway(updates=[], files={})
+        uow = InMemoryUnitOfWork()
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+
+        with self.assertRaises(BusinessRuleError) as context:
+            runtime.run(
+                TelegramRuntimeCommand(
+                    max_cycles=0,
+                    max_failed_cycles=1,
+                    poll_timeout_seconds=1,
+                    idle_sleep_seconds=0.0,
+                )
+            )
+
+        self.assertEqual(context.exception.code, "TELEGRAM_MAX_CYCLES_INVALID")
+
+    def test_rejects_invalid_poll_timeout(self) -> None:
+        gateway = FakeTelegramGateway(updates=[], files={})
+        uow = InMemoryUnitOfWork()
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+
+        with self.assertRaises(BusinessRuleError) as context:
+            runtime.run(
+                TelegramRuntimeCommand(
+                    max_cycles=1,
+                    max_failed_cycles=1,
+                    poll_timeout_seconds=0,
+                    idle_sleep_seconds=0.0,
+                )
+            )
+
+        self.assertEqual(context.exception.code, "TELEGRAM_POLL_TIMEOUT_INVALID")
+
+    def test_rejects_invalid_idle_sleep(self) -> None:
+        gateway = FakeTelegramGateway(updates=[], files={})
+        uow = InMemoryUnitOfWork()
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+
+        with self.assertRaises(BusinessRuleError) as context:
+            runtime.run(
+                TelegramRuntimeCommand(
+                    max_cycles=1,
+                    max_failed_cycles=1,
+                    poll_timeout_seconds=1,
+                    idle_sleep_seconds=-0.01,
+                )
+            )
+
+        self.assertEqual(context.exception.code, "TELEGRAM_IDLE_SLEEP_INVALID")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+
+

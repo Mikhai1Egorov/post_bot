@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from post_bot.application.use_cases.create_tasks import TaskCreationUseCase  # noqa: E402
 from post_bot.application.use_cases.ensure_user import EnsureUserUseCase  # noqa: E402
+from post_bot.application.use_cases.release_upload_reservation import ReleaseUploadReservationUseCase  # noqa: E402
 from post_bot.application.use_cases.reserve_balance import ReserveBalanceUseCase  # noqa: E402
 from post_bot.application.use_cases.start_upload_pipeline import StartUploadPipelineUseCase  # noqa: E402
 from post_bot.application.use_cases.upload_intake import UploadIntakeUseCase  # noqa: E402
@@ -23,11 +24,12 @@ from post_bot.infrastructure.testing.in_memory import FakeExcelTaskParser, InMem
 from post_bot.pipeline.modules.validation import ExcelContractValidator  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
+
 class TelegramUploadCommandHandlerTests(unittest.TestCase):
 
     @staticmethod
     def _build_handler(
-            *,
+        *,
         uow: InMemoryUnitOfWork,
         parser: FakeExcelTaskParser,
     ) -> TelegramUploadCommandHandler:
@@ -43,6 +45,10 @@ class TelegramUploadCommandHandlerTests(unittest.TestCase):
             ),
             reserve=ReserveBalanceUseCase(uow=uow, logger=logging.getLogger("test.upload.reserve")),
             create_tasks=TaskCreationUseCase(uow=uow, logger=logging.getLogger("test.upload.create")),
+            release_reservation=ReleaseUploadReservationUseCase(
+                uow=uow,
+                logger=logging.getLogger("test.upload.release"),
+            ),
             logger=logging.getLogger("test.upload.start"),
         )
         upload_handler = UploadCommandHandler(start_upload_pipeline=start_pipeline)
@@ -133,6 +139,7 @@ class TelegramUploadCommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(first.user_id, second.user_id)
         self.assertEqual(uow.users.by_id[first.user_id].interface_language, InterfaceLanguage.AR.value)
+
 
 if __name__ == "__main__":
     unittest.main()

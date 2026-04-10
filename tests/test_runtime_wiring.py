@@ -11,12 +11,13 @@ from post_bot.domain.models import BalanceSnapshot, Task  # noqa: E402
 from post_bot.infrastructure.runtime.worker_runtime import WorkerRuntimeCommand  # noqa: E402
 from post_bot.infrastructure.runtime.wiring import (  # noqa: E402
     RuntimeWiring,
+    UnconfiguredImageClient,
     UnconfiguredLLMClient,
-    UnconfiguredPublisher,
     UnconfiguredResearchClient,
     build_worker_runtime,
 )
 from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
+    FakeImageClient,
     FakeLLMClient,
     FakePublisher,
     FakeResearchClient,
@@ -25,6 +26,7 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
     InMemoryUnitOfWork,
 )
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
+
 
 def _resources() -> dict[str, str]:
     return {
@@ -36,6 +38,7 @@ def _resources() -> dict[str, str]:
         "CONTENT_LENGTH_RULES.txt": "LENGTH RULES",
         "LENGTH-BLOCKS.txt": "OPTIONAL RULES",
     }
+
 
 class RuntimeWiringTests(unittest.TestCase):
 
@@ -90,6 +93,7 @@ class RuntimeWiringTests(unittest.TestCase):
             prompt_loader=InMemoryPromptLoader(_resources()),
             research_client=FakeResearchClient(),
             llm_client=FakeLLMClient(response_text="# Title\nParagraph"),
+            image_client=FakeImageClient(),
             publisher=FakePublisher(),
         )
         runtime = build_worker_runtime(wiring=wiring, logger=logging.getLogger("test.wiring.success"))
@@ -110,7 +114,8 @@ class RuntimeWiringTests(unittest.TestCase):
             prompt_loader=InMemoryPromptLoader(_resources()),
             research_client=UnconfiguredResearchClient(),
             llm_client=UnconfiguredLLMClient(),
-            publisher=UnconfiguredPublisher(),
+            image_client=UnconfiguredImageClient(),
+            publisher=FakePublisher(),
         )
         runtime = build_worker_runtime(wiring=wiring, logger=logging.getLogger("test.wiring.unconfigured"))
 
@@ -119,7 +124,8 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertEqual(result.tasks_processed, 1)
         self.assertEqual(result.failed_cycles, 1)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
-        self.assertEqual(uow.tasks.tasks[1].last_error_message, "RESEARCH_CLIENT_NOT_CONFIGURED: Research adapter is not configured.")
+        self.assertEqual(uow.tasks.tasks[1].last_error_message, "OPENAI_API_KEY_REQUIRED: OPENAI_API_KEY is required for research stage.")
+
 
 if __name__ == "__main__":
     unittest.main()

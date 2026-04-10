@@ -1,4 +1,4 @@
-﻿"""Single entrypoint for approval user actions."""
+"""Single entrypoint for approval user actions."""
 
 from __future__ import annotations
 

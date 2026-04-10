@@ -1,4 +1,4 @@
-﻿"""Filesystem-backed provider for template and localized README bundles."""
+"""Filesystem-backed provider for template and localized README bundles."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ from post_bot.shared.errors import InternalError
 
 class LocalInstructionBundleProvider:
     """Loads canonical template and language-specific README files from disk."""
+
+    _RTL_EMBED_START = "\u202B"
+    _RTL_EMBED_END = "\u202C"
+    _UTF8_BOM = "\ufeff"
 
     def __init__(
         self,
@@ -50,6 +54,43 @@ class LocalInstructionBundleProvider:
             template_file_name=self._template_path.name,
             template_bytes=self._template_path.read_bytes(),
             readme_file_name=readme_path.name,
-            readme_bytes=readme_path.read_bytes(),
+            readme_bytes=self._read_readme_bytes(
+                interface_language=interface_language,
+                readme_path=readme_path,
+            ),
         )
+
+    def _read_readme_bytes(self, *, interface_language: InterfaceLanguage, readme_path: Path) -> bytes:
+        raw = readme_path.read_bytes()
+        if interface_language != InterfaceLanguage.AR:
+            return raw
+        return self._format_arabic_readme_rtl(raw)
+
+    @classmethod
+    def _format_arabic_readme_rtl(cls, raw: bytes) -> bytes:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw
+
+        if not text:
+            return raw
+
+        lines_with_endings = text.splitlines(keepends=True)
+        if not lines_with_endings:
+            return raw
+
+        wrapped_parts: list[str] = []
+        for item in lines_with_endings:
+            line = item.rstrip("\r\n")
+            ending = item[len(line) :]
+            if line.strip():
+                wrapped_parts.append(f"{cls._RTL_EMBED_START}{line}{cls._RTL_EMBED_END}{ending}")
+            else:
+                wrapped_parts.append(item)
+
+        formatted = "".join(wrapped_parts)
+        if not formatted.startswith(cls._UTF8_BOM):
+            formatted = cls._UTF8_BOM + formatted
+        return formatted.encode("utf-8")
 

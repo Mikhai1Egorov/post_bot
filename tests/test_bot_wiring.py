@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import shutil
@@ -126,6 +126,41 @@ class BotWiringTests(unittest.TestCase):
                     bundle = provider.load_bundle(interface_language=language)
                     self.assertEqual(bundle.template_file_name, "NEO_TEMPLATE.xlsx")
                     self.assertEqual(bundle.readme_file_name, "README_PIPELINE.txt")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+    def test_default_instruction_bundle_provider_uses_localized_readmes_from_folder(self) -> None:
+        root = self._make_temp_root(".tmp_default_instruction_provider_localized")
+        try:
+            (root / "NEO_TEMPLATE.xlsx").write_bytes(b"template")
+            readme_dir = root / "readme"
+            readme_dir.mkdir(parents=True, exist_ok=True)
+
+            localized = {
+                InterfaceLanguage.EN: "README_PIPELINE_ENG.txt",
+                InterfaceLanguage.RU: "README_PIPELINE_RU.txt",
+                InterfaceLanguage.UK: "README_PIPELINE_UK.txt",
+                InterfaceLanguage.ES: "README_PIPELINE_ES.txt",
+                InterfaceLanguage.ZH: "README_PIPELINE_ZH.txt",
+                InterfaceLanguage.HI: "README_PIPELINE_HI.txt",
+                InterfaceLanguage.AR: "README_PIPELINE_AR.txt",
+            }
+            for language, file_name in localized.items():
+                (readme_dir / file_name).write_text(f"readme-{language.value}", encoding="utf-8")
+
+            provider = build_default_instruction_bundle_provider(project_root=root)
+            for language, expected_file_name in localized.items():
+                with self.subTest(language=language.value):
+                    bundle = provider.load_bundle(interface_language=language)
+                    self.assertEqual(bundle.template_file_name, "NEO_TEMPLATE.xlsx")
+                    self.assertEqual(bundle.readme_file_name, expected_file_name)
+                    if language == InterfaceLanguage.AR:
+                        decoded = bundle.readme_bytes.decode("utf-8")
+                        self.assertTrue(decoded.startswith("﻿"))
+                        self.assertIn("‫readme-ar‬", decoded)
+                    else:
+                        self.assertEqual(bundle.readme_bytes, f"readme-{language.value}".encode("utf-8"))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

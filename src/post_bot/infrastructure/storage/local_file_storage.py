@@ -1,4 +1,4 @@
-﻿"""Local filesystem storage adapter."""
+"""Local filesystem storage adapter."""
 
 from __future__ import annotations
 

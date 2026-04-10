@@ -1,4 +1,4 @@
-﻿"""Application helper for guarded task status transitions with history."""
+"""Application helper for guarded task status transitions with history."""
 
 from __future__ import annotations
 

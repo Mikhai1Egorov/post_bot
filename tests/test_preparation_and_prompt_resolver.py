@@ -39,7 +39,6 @@ class PreparationAndPromptResolverTests(unittest.TestCase):
 
     def test_preparation_normalizes_task_payload(self) -> None:
         prepared = PreparationModule().prepare(self._task())
-        self.assertEqual(prepared.search_language, "en")
         self.assertEqual(prepared.response_language, "en")
         self.assertTrue(prepared.include_image)
         self.assertEqual(prepared.schedule_at_iso, "2026-04-08T12:30:00")

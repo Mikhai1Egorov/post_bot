@@ -1,4 +1,4 @@
-﻿"""Transport handler for Telegram upload command."""
+"""Transport handler for Telegram upload command."""
 
 from __future__ import annotations
 

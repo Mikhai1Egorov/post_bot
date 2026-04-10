@@ -15,7 +15,6 @@ REQUIRED_FIELDS: tuple[str, ...] = (
 
 OPTIONAL_FIELDS: tuple[str, ...] = (
     "title",
-    "search_language",
     "style",
     "length",
     "include_image",
@@ -26,7 +25,6 @@ OPTIONAL_FIELDS: tuple[str, ...] = (
 
 ALL_FIELDS: tuple[str, ...] = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
-SEARCH_LANGUAGE_VALUES: tuple[str, ...] = tuple(language.value for language in InterfaceLanguage)
 RESPONSE_LANGUAGE_VALUES: tuple[str, ...] = tuple(language.value for language in InterfaceLanguage)
 STYLE_VALUES: tuple[str, ...] = tuple(style.value for style in StyleCode)
 LENGTH_VALUES: tuple[str, ...] = tuple(length.value for length in ContentLength)
@@ -54,4 +52,3 @@ STYLE_TO_PROMPT_RESOURCE: dict[str, str] = {
     "simple": "SIMPLE_PROMPT_STYLE",
     "expert": "EXPERT_PROMPT_STYLE",
 }
-

@@ -1,4 +1,4 @@
-﻿"""Runtime services for background execution loops and bot handler composition."""
+"""Runtime services for background execution loops and bot handler composition."""
 
 from post_bot.infrastructure.runtime.bot_wiring import (
     BotWiring,
@@ -22,7 +22,6 @@ from post_bot.infrastructure.runtime.worker_runtime import WorkerRuntime, Worker
 from post_bot.infrastructure.runtime.wiring import (
     RuntimeWiring,
     UnconfiguredLLMClient,
-    UnconfiguredPublisher,
     UnconfiguredResearchClient,
     build_default_runtime_wiring,
     build_maintenance_runtime,
@@ -41,7 +40,6 @@ __all__ = [
     "TelegramRuntimeCommand",
     "TelegramRuntimeResult",
     "UnconfiguredLLMClient",
-    "UnconfiguredPublisher",
     "UnconfiguredResearchClient",
     "WorkerRuntime",
     "WorkerRuntimeCommand",

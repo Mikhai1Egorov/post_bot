@@ -84,7 +84,6 @@ class PromptResolverModule:
             "{title}": payload.title,
             "{keywords}": payload.keywords,
             "{response_language}": payload.response_language,
-            "{search_language}": payload.search_language,
             "{time_range}": payload.time_range,
         }
         output = master_template
@@ -101,7 +100,6 @@ class PromptResolverModule:
                 f"title={payload.title}",
                 f"keywords={payload.keywords}",
                 f"time_range={payload.time_range}",
-                f"search_language={payload.search_language}",
                 f"response_language={payload.response_language}",
                 f"style={payload.style}",
                 f"length={payload.length}",
@@ -125,4 +123,6 @@ class PromptResolverModule:
         if not research_context:
             return "RESEARCH_CONTEXT:\n(none)"
         return f"RESEARCH_CONTEXT:\n{research_context}"
+
+
 

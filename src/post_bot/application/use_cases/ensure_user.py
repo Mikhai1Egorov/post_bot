@@ -1,4 +1,4 @@
-﻿"""Ensure user identity and selected interface language in DB."""
+"""Ensure user identity and selected interface language in DB."""
 
 from __future__ import annotations
 

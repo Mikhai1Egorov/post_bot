@@ -1,1 +1,1 @@
-﻿"""Application use-cases and orchestration."""
+"""Application use-cases and orchestration."""

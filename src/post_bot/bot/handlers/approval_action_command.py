@@ -1,4 +1,4 @@
-﻿"""Transport handler for approval publish/download actions."""
+"""Transport handler for approval publish/download actions."""
 
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from post_bot.domain.models import NormalizedTaskConfig, ParsedExcelData, UploadValidationErrorItem
 from post_bot.shared.constants import (
@@ -17,7 +17,6 @@ from post_bot.shared.constants import (
     REQUIRED_FIELDS,
     RESPONSE_LANGUAGE_VALUES,
     SCHEDULE_DATETIME_FORMAT,
-    SEARCH_LANGUAGE_VALUES,
     STYLE_VALUES,
 )
 from post_bot.shared.enums import IncludeImageExcelValue, PublishMode, TimeRange
@@ -36,11 +35,14 @@ class ValidationModuleResult:
 class ExcelContractValidator:
     """Validates rows against canonical Excel contract and applies defaults."""
 
+    def __init__(self, now_provider: Callable[[], datetime] | None = None) -> None:
+        self._now_provider = now_provider or datetime.now
+
     def validate(self, *, upload_id: int, parsed: ParsedExcelData) -> ValidationModuleResult:
         errors: list[UploadValidationErrorItem] = []
         normalized_rows: list[NormalizedTaskConfig] = []
 
-        known_headers = set(ALL_FIELDS)
+        known_headers = set(ALL_FIELDS) | {"search_language"}
         provided_headers = set(parsed.headers)
 
         for header in sorted(provided_headers - known_headers):
@@ -83,7 +85,6 @@ class ExcelContractValidator:
                 normalized.title,
                 normalized.keywords,
                 normalized.time_range,
-                normalized.search_language,
                 normalized.response_language,
                 normalized.style,
                 normalized.length,
@@ -131,7 +132,10 @@ class ExcelContractValidator:
         values: dict[str, Any],
         errors: list[UploadValidationErrorItem],
     ) -> NormalizedTaskConfig | None:
-        channel = self._required_text(upload_id, excel_row, "channel", values.get("channel"), errors)
+        raw_channel_value = values.get("channel")
+        channel = self._required_text(upload_id, excel_row, "channel", raw_channel_value, errors)
+        if channel is not None:
+            channel = self._normalize_channel_value(raw_channel_value, channel)
         topic = self._required_text(upload_id, excel_row, "topic", values.get("topic"), errors)
         keywords = self._required_text(upload_id, excel_row, "keywords", values.get("keywords"), errors)
         time_range = self._required_text(upload_id, excel_row, "time_range", values.get("time_range"), errors)
@@ -144,16 +148,21 @@ class ExcelContractValidator:
         )
         mode = self._required_text(upload_id, excel_row, "mode", values.get("mode"), errors)
 
-        if channel is None or topic is None or keywords is None or time_range is None or response_language is None or mode is None:
-            return None
-
-        self._validate_enum(upload_id, excel_row, "time_range", time_range, tuple(item.value for item in TimeRange), errors)
-        self._validate_enum(upload_id, excel_row, "response_language", response_language, RESPONSE_LANGUAGE_VALUES, errors)
-        self._validate_enum(upload_id, excel_row, "mode", mode, tuple(item.value for item in PublishMode), errors)
-
-        raw_search = self._optional_text(values.get("search_language"))
-        search_language = raw_search if raw_search else response_language
-        self._validate_enum(upload_id, excel_row, "search_language", search_language, SEARCH_LANGUAGE_VALUES, errors)
+        if time_range is not None:
+            self._validate_enum(
+                upload_id,
+                excel_row,
+                "time_range",
+                time_range,
+                tuple(item.value for item in TimeRange),
+                errors,
+            )
+        if response_language is not None:
+            self._validate_enum(upload_id, excel_row, "response_language", response_language, RESPONSE_LANGUAGE_VALUES, errors)
+        if mode is not None:
+            self._validate_enum(upload_id, excel_row, "mode", mode, tuple(item.value for item in PublishMode), errors)
+        if channel is not None:
+            self._validate_channel_target(upload_id, excel_row, channel, errors)
 
         raw_style = self._optional_text(values.get("style"))
         style = raw_style if raw_style else DEFAULT_STYLE
@@ -164,7 +173,7 @@ class ExcelContractValidator:
         self._validate_enum(upload_id, excel_row, "length", length, LENGTH_VALUES, errors)
 
         title = self._optional_text(values.get("title"))
-        resolved_title = title if title else topic
+        resolved_title = title if title else (topic or "")
 
         include_image_raw = values.get("include_image")
         include_image_excel = self._normalize_include_image_value(include_image_raw)
@@ -202,9 +211,27 @@ class ExcelContractValidator:
                     bad_value=self._value_to_error_text(schedule_raw),
                 )
             )
+        if schedule_at is not None and self._is_schedule_in_past(schedule_at):
+            current_time = self._normalize_for_comparison(self._now_provider()).isoformat(timespec="minutes")
+            errors.append(
+                UploadValidationErrorItem(
+                    upload_id=upload_id,
+                    excel_row=excel_row,
+                    column_name="schedule_at",
+                    error_code="SCHEDULE_AT_IN_PAST",
+                    error_message="schedule_at is in the past relative to current system time.",
+                    bad_value=(
+                        f"value={schedule_at.isoformat(timespec='minutes')}; "
+                        f"current_system_time={current_time}"
+                    ),
+                )
+            )
 
         footer_text = self._optional_text(values.get("footer_text"))
         footer_link = self._optional_text(values.get("footer_link"))
+
+        if channel is None or topic is None or keywords is None or time_range is None or response_language is None or mode is None:
+            return None
 
         return NormalizedTaskConfig(
             excel_row=excel_row,
@@ -213,7 +240,6 @@ class ExcelContractValidator:
             title=resolved_title,
             keywords=keywords,
             time_range=time_range,
-            search_language=search_language,
             response_language=response_language,
             style=style,
             length=length,
@@ -256,6 +282,27 @@ class ExcelContractValidator:
             )
         )
         return None
+
+    @staticmethod
+    def _normalize_channel_value(raw_value: Any, normalized_text: str) -> str:
+        value = normalized_text.strip()
+
+        if isinstance(raw_value, float) and raw_value.is_integer():
+            return str(int(raw_value))
+
+        sign = ""
+        body = value
+        if body.startswith("-") or body.startswith("+"):
+            sign = body[0]
+            body = body[1:]
+
+        if "." not in body:
+            return value
+
+        integer_part, fractional_part = body.split(".", 1)
+        if integer_part.isdigit() and fractional_part and set(fractional_part) == {"0"}:
+            return f"{sign}{integer_part}"
+        return value
 
     @staticmethod
     def _validate_enum(
@@ -320,4 +367,53 @@ class ExcelContractValidator:
             return None
         text = str(value)
         return text if text else None
+
+    def _is_schedule_in_past(self, schedule_at: datetime) -> bool:
+        candidate = self._normalize_for_comparison(schedule_at)
+        now_value = self._normalize_for_comparison(self._now_provider())
+        return candidate < now_value
+
+    @staticmethod
+    def _validate_channel_target(
+        upload_id: int,
+        excel_row: int,
+        channel: str,
+        errors: list[UploadValidationErrorItem],
+    ) -> None:
+        value = channel.strip()
+        lowered = value.lower()
+        if lowered.startswith("https://t.me/+") or lowered.startswith("http://t.me/+") or lowered.startswith("t.me/+"):
+            errors.append(
+                UploadValidationErrorItem(
+                    upload_id=upload_id,
+                    excel_row=excel_row,
+                    column_name="channel",
+                    error_code="CHANNEL_INVITE_LINK_UNSUPPORTED",
+                    error_message="Invite link is not a valid publish target. Use @channel_username or numeric chat_id.",
+                    bad_value=value,
+                )
+            )
+            return
+        if "/joinchat/" in lowered:
+            errors.append(
+                UploadValidationErrorItem(
+                    upload_id=upload_id,
+                    excel_row=excel_row,
+                    column_name="channel",
+                    error_code="CHANNEL_INVITE_LINK_UNSUPPORTED",
+                    error_message="Invite link is not a valid publish target. Use @channel_username or numeric chat_id.",
+                    bad_value=value,
+                )
+            )
+            return
+
+    @staticmethod
+    def _normalize_for_comparison(value: datetime) -> datetime:
+        normalized = value
+        if normalized.tzinfo is not None:
+            normalized = normalized.astimezone().replace(tzinfo=None)
+        return normalized.replace(second=0, microsecond=0)
+
+
+
 

@@ -1,4 +1,4 @@
-﻿"""Transport handler for approval batch build action."""
+"""Transport handler for approval batch build action."""
 
 from __future__ import annotations
 

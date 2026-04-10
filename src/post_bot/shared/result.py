@@ -1,4 +1,4 @@
-﻿"""Small Result wrapper for explicit success/failure returns."""
+"""Small Result wrapper for explicit success/failure returns."""
 
 from __future__ import annotations
 

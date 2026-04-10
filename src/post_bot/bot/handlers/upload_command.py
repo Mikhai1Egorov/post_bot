@@ -1,4 +1,4 @@
-﻿"""Transport handler for Excel upload command."""
+"""Transport handler for Excel upload command."""
 
 from __future__ import annotations
 

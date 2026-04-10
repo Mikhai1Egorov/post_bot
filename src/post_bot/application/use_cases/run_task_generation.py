@@ -1,4 +1,4 @@
-﻿"""Run preparation -> research -> prompt resolve -> generation for one task."""
+"""Run preparation -> research -> prompt resolve -> generation for one task."""
 
 from __future__ import annotations
 

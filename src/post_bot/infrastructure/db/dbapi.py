@@ -1,4 +1,4 @@
-﻿"""Small DB-API based helpers used by repository implementations."""
+"""Small DB-API based helpers used by repository implementations."""
 
 from __future__ import annotations
 

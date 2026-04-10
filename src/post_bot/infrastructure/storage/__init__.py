@@ -1,1 +1,1 @@
-﻿"""Storage adapters."""
+"""Storage adapters."""

@@ -1,1 +1,1 @@
-﻿"""Shared primitives used across all layers."""
+"""Shared primitives used across all layers."""

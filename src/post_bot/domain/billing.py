@@ -1,4 +1,4 @@
-﻿"""Domain rules for billing lifecycle."""
+"""Domain rules for billing lifecycle."""
 
 from __future__ import annotations
 

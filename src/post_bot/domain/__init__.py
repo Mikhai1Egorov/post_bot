@@ -1,1 +1,1 @@
-﻿"""Domain rules and entities."""
+"""Domain rules and entities."""

@@ -106,7 +106,7 @@ class WorkerRuntime:
             level=20,
             module="infrastructure.runtime.worker_runtime",
             action="worker_runtime_finished",
-            result="success",
+            result="success" if failed_cycles == 0 else "partial_failure",
             duration_ms=timer.elapsed_ms(),
             extra={
                 "worker_id": command.worker_id,
@@ -123,4 +123,5 @@ class WorkerRuntime:
             failed_cycles=failed_cycles,
             terminated_early=terminated_early,
         )
+
 

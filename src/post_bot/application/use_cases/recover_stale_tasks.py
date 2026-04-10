@@ -1,4 +1,4 @@
-﻿"""Recovery job for stale in-progress tasks."""
+"""Recovery job for stale in-progress tasks."""
 
 from __future__ import annotations
 

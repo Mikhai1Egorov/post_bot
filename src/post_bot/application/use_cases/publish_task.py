@@ -130,6 +130,8 @@ class PublishTaskUseCase:
                     html=render.body_html,
                     scheduled_for=task.scheduled_publish_at,
                 )
+            except AppError:
+                raise
             except Exception as error:  # noqa: BLE001
                 raise ExternalDependencyError(
                     code="PUBLISH_ADAPTER_ERROR",
@@ -161,6 +163,20 @@ class PublishTaskUseCase:
                 resolve_upload_status_from_tasks(uow=self._uow, upload_id=task.upload_id)
                 self._uow.commit()
 
+            publish_trace: dict[str, object] = {
+                "task_id": task.id,
+                "publication_id": publication_id,
+            }
+            if isinstance(payload, dict):
+                publish_trace.update(
+                    {
+                        "publisher_branch": payload.get("publisher_branch"),
+                        "photo_sent": payload.get("photo_sent"),
+                        "image_delivery_kind": payload.get("image_delivery_kind"),
+                        "image_fallback_reason": payload.get("image_fallback_reason"),
+                    }
+                )
+
             log_event(
                 self._logger,
                 level=20,
@@ -170,7 +186,7 @@ class PublishTaskUseCase:
                 status_before=status_before.value if status_before else None,
                 status_after=TaskStatus.DONE.value,
                 duration_ms=timer.elapsed_ms(),
-                extra={"task_id": task.id, "publication_id": publication_id},
+                extra=publish_trace,
             )
             return PublishTaskResult(
                 task_id=task.id,
@@ -260,3 +276,4 @@ class PublishTaskUseCase:
             external_message_id=None,
             error_code=error.code,
         )
+

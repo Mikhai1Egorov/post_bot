@@ -1,4 +1,4 @@
-﻿"""Upload status resolver from task states."""
+"""Upload status resolver from task states."""
 
 from __future__ import annotations
 

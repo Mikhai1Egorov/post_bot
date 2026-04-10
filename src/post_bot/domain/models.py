@@ -73,7 +73,7 @@ class Task:
     task_status: TaskStatus = TaskStatus.CREATED
     retry_count: int = 0
     last_error_message: str | None = None
-
+    completed_at: datetime | None = None
 @dataclass(slots=True, frozen=True)
 class TaskStatusHistoryItem:
     task_id: int
@@ -197,7 +197,6 @@ class NormalizedTaskConfig:
     title: str
     keywords: str
     time_range: str
-    search_language: str
     response_language: str
     style: str
     length: str
@@ -216,3 +215,4 @@ class ParsedExcelRow:
 class ParsedExcelData:
     headers: tuple[str, ...]
     rows: tuple[ParsedExcelRow, ...]
+

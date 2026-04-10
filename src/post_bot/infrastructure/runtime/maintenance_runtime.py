@@ -1,4 +1,4 @@
-﻿"""Runtime loop wrapper for periodic maintenance execution."""
+"""Runtime loop wrapper for periodic maintenance execution."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ class MaintenanceRuntimeCommand:
     cleanup_dry_run: bool = False
     launch_profile: str = "manual"
     max_failed_iterations: int | None = None
+    max_stage_retry_attempts: int = 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -70,6 +71,12 @@ class MaintenanceRuntime:
                 message="max_failed_iterations must be >= 1 when provided.",
                 details={"max_failed_iterations": command.max_failed_iterations},
             )
+        if command.max_stage_retry_attempts < 1:
+            raise BusinessRuleError(
+                code="MAINTENANCE_STAGE_RETRY_ATTEMPTS_INVALID",
+                message="max_stage_retry_attempts must be >= 1.",
+                details={"max_stage_retry_attempts": command.max_stage_retry_attempts},
+            )
 
         timer = TimedLog()
 
@@ -97,6 +104,7 @@ class MaintenanceRuntime:
                         expire_reason_code=command.expire_reason_code,
                         cleanup_non_final_artifacts=command.cleanup_non_final_artifacts,
                         cleanup_dry_run=command.cleanup_dry_run,
+                        max_stage_retry_attempts=command.max_stage_retry_attempts,
                     )
                 )
             except AppError as error:
@@ -147,6 +155,36 @@ class MaintenanceRuntime:
                 cleanup_deleted_total += result.cleanup_deleted_count
                 expired_total += result.expired_count
 
+                if result.failed_stage_count > 0:
+                    failed_iterations += 1
+                    internal = InternalError(
+                        code="MAINTENANCE_CYCLE_STAGE_FAILURE",
+                        message="Maintenance cycle finished with stage failures.",
+                        details={
+                            "launch_profile": command.launch_profile,
+                            "cycle_number": cycle_number,
+                            "failed_stage_count": result.failed_stage_count,
+                            "failed_stages": result.failed_stages,
+                        },
+                    )
+                    log_event(
+                        self._logger,
+                        level=40,
+                        module="infrastructure.runtime.maintenance_runtime",
+                        action="maintenance_cycle_failed",
+                        result="failure",
+                        duration_ms=cycle_timer.elapsed_ms(),
+                        error=internal,
+                        extra={
+                            "launch_profile": command.launch_profile,
+                            "cycle_number": cycle_number,
+                            "iterations_total": command.iterations,
+                            "failed_iterations": failed_iterations,
+                            "failed_stage_count": result.failed_stage_count,
+                            "failed_stages": result.failed_stages,
+                        },
+                    )
+
             if command.max_failed_iterations is not None and failed_iterations >= command.max_failed_iterations:
                 terminated_early = True
                 break
@@ -168,6 +206,7 @@ class MaintenanceRuntime:
                 "iterations_requested": command.iterations,
                 "failed_iterations": failed_iterations,
                 "max_failed_iterations": command.max_failed_iterations,
+                "max_stage_retry_attempts": command.max_stage_retry_attempts,
                 "terminated_early": terminated_early,
                 "recovered_total": recovered_total,
                 "expired_total": expired_total,
@@ -182,3 +221,4 @@ class MaintenanceRuntime:
             failed_iterations=failed_iterations,
             terminated_early=terminated_early,
         )
+

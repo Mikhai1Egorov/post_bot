@@ -23,7 +23,7 @@ from post_bot.domain.protocols.repositories import (
     UserRepository,
 )
 from post_bot.infrastructure.db.dbapi import DBApiConnection
-from post_bot.infrastructure.db.mysql_connection import MySQLConnectionFactory
+from post_bot.infrastructure.db.mysql_connection import MySQLConnectionFactory, MySQLSettings
 from post_bot.infrastructure.db.mysql_repositories import (
     MySQLApprovalBatchItemRepository,
     MySQLApprovalBatchRepository,
@@ -41,6 +41,7 @@ from post_bot.infrastructure.db.mysql_repositories import (
     MySQLUserRepository,
 )
 from post_bot.shared.errors import InternalError
+
 
 class MySQLUnitOfWork:
     """Transaction boundary with concrete MySQL repositories."""
@@ -132,5 +133,16 @@ class MySQLUnitOfWork:
         finally:
             self._lock.release()
 
-def build_mysql_uow_from_dsn(dsn: str) -> MySQLUnitOfWork:
-    return MySQLUnitOfWork(connection_factory=MySQLConnectionFactory(dsn))
+
+def build_mysql_uow(*, host: str, port: int, user: str, password: str, database: str) -> MySQLUnitOfWork:
+    return MySQLUnitOfWork(
+        connection_factory=MySQLConnectionFactory(
+            MySQLSettings(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
+            )
+        )
+    )

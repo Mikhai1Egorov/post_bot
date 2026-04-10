@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 import logging
@@ -67,6 +67,66 @@ class _AlwaysFailingMaintenanceCycle:
         _ = command
         self.calls += 1
         raise RuntimeError("always crash")
+
+
+
+class _PartiallyFailingMaintenanceCycle:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        self.calls += 1
+        return RunMaintenanceCycleResult(
+            recovered_count=2,
+            recovered_task_ids=(11, 12),
+            selected_stale_task_ids=(11, 12),
+            cleanup_scanned_count=4,
+            cleanup_deleted_count=1,
+            cleanup_deleted_artifact_ids=(701,),
+            expired_count=1,
+            expired_batch_ids=(91,),
+            selected_expirable_batch_ids=(91,),
+            failed_stage_count=1,
+            failed_stages=("cleanup_non_final_artifacts",),
+        )
+
+
+class _MixedMaintenanceCycle:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        self.calls += 1
+        if self.calls == 1:
+            return RunMaintenanceCycleResult(
+                recovered_count=2,
+                recovered_task_ids=(11, 12),
+                selected_stale_task_ids=(11, 12),
+                cleanup_scanned_count=4,
+                cleanup_deleted_count=1,
+                cleanup_deleted_artifact_ids=(701,),
+                expired_count=1,
+                expired_batch_ids=(91,),
+                selected_expirable_batch_ids=(91,),
+                failed_stage_count=1,
+                failed_stages=("cleanup_non_final_artifacts",),
+            )
+
+        return RunMaintenanceCycleResult(
+            recovered_count=3,
+            recovered_task_ids=(21, 22, 23),
+            selected_stale_task_ids=(21, 22, 23),
+            cleanup_scanned_count=6,
+            cleanup_deleted_count=2,
+            cleanup_deleted_artifact_ids=(801, 802),
+            expired_count=2,
+            expired_batch_ids=(101, 102),
+            selected_expirable_batch_ids=(101, 102),
+            failed_stage_count=0,
+            failed_stages=tuple(),
+        )
 
 
 class MaintenanceRuntimeTests(unittest.TestCase):
@@ -170,6 +230,104 @@ class MaintenanceRuntimeTests(unittest.TestCase):
         self.assertEqual(result.failed_iterations, 0)
         self.assertFalse(result.terminated_early)
 
+    def test_runtime_recovers_stale_task_after_worker_crash_without_billing_drift(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.tasks.create_many([self._task(1, upload.id, TaskStatus.PREPARING)])
+        uow.tasks.updated_at_by_task_id[1] = datetime(2020, 1, 1, 0, 0, 0)
+
+        runtime = self._build_runtime(uow=uow, storage=storage)
+        result = runtime.run(
+            MaintenanceRuntimeCommand(
+                iterations=1,
+                interval_seconds=0,
+                auto_recover_older_than_minutes=60,
+                auto_recover_limit=10,
+                cleanup_non_final_artifacts=False,
+            )
+        )
+
+        self.assertEqual(result.iterations_executed, 1)
+        self.assertEqual(result.recovered_total, 1)
+        self.assertEqual(result.expired_total, 0)
+        self.assertEqual(result.cleanup_deleted_total, 0)
+        self.assertEqual(result.failed_iterations, 0)
+        self.assertFalse(result.terminated_early)
+
+        task = uow.tasks.tasks[1]
+        self.assertEqual(task.task_status, TaskStatus.FAILED)
+        self.assertEqual(task.retry_count, 1)
+        self.assertEqual(task.last_error_message, "STALE_TASK_RECOVERY")
+        self.assertEqual(task.billing_state, TaskBillingState.CONSUMED)
+
+        history = uow.task_status_history.entries
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].task_id, 1)
+        self.assertEqual(history[0].old_status, TaskStatus.PREPARING)
+        self.assertEqual(history[0].new_status, TaskStatus.FAILED)
+        self.assertEqual(history[0].change_note, "STALE_TASK_RECOVERY")
+
+        self.assertEqual(uow.uploads.uploads[upload.id].upload_status, UploadStatus.FAILED)
+        self.assertEqual(len(uow.ledger.entries), 0)
+
+    def test_runtime_recovery_is_idempotent_on_repeated_runs(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.tasks.create_many([self._task(1, upload.id, TaskStatus.PREPARING)])
+        uow.tasks.updated_at_by_task_id[1] = datetime(2020, 1, 1, 0, 0, 0)
+
+        runtime = self._build_runtime(uow=uow, storage=storage)
+
+        first = runtime.run(
+            MaintenanceRuntimeCommand(
+                iterations=1,
+                interval_seconds=0,
+                auto_recover_older_than_minutes=60,
+                auto_recover_limit=10,
+                cleanup_non_final_artifacts=False,
+            )
+        )
+
+        second = runtime.run(
+            MaintenanceRuntimeCommand(
+                iterations=1,
+                interval_seconds=0,
+                auto_recover_older_than_minutes=60,
+                auto_recover_limit=10,
+                cleanup_non_final_artifacts=False,
+            )
+        )
+
+        self.assertEqual(first.iterations_executed, 1)
+        self.assertEqual(first.recovered_total, 1)
+        self.assertEqual(first.failed_iterations, 0)
+
+        self.assertEqual(second.iterations_executed, 1)
+        self.assertEqual(second.recovered_total, 0)
+        self.assertEqual(second.failed_iterations, 0)
+
+        task = uow.tasks.tasks[1]
+        self.assertEqual(task.task_status, TaskStatus.FAILED)
+        self.assertEqual(task.retry_count, 1)
+        self.assertEqual(task.last_error_message, "STALE_TASK_RECOVERY")
+        self.assertEqual(task.billing_state, TaskBillingState.CONSUMED)
+
+        history = uow.task_status_history.entries
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].task_id, 1)
+        self.assertEqual(history[0].old_status, TaskStatus.PREPARING)
+        self.assertEqual(history[0].new_status, TaskStatus.FAILED)
+        self.assertEqual(history[0].change_note, "STALE_TASK_RECOVERY")
+
+        self.assertEqual(uow.uploads.uploads[upload.id].upload_status, UploadStatus.FAILED)
+        self.assertEqual(len(uow.ledger.entries), 0)
+
     def test_runtime_continues_when_one_cycle_fails(self) -> None:
         sleep_calls: list[float] = []
 
@@ -219,6 +377,82 @@ class MaintenanceRuntimeTests(unittest.TestCase):
         self.assertEqual(cycle.calls, 2)
         self.assertEqual(sleep_calls, [0.5])
 
+    def test_runtime_counts_partial_cycle_failure_and_preserves_totals(self) -> None:
+        cycle = _PartiallyFailingMaintenanceCycle()
+        runtime = MaintenanceRuntime(
+            run_maintenance_cycle=cycle,
+            logger=logging.getLogger("test.runtime.maintenance.partial_stage_failure"),
+            sleep_fn=lambda _: None,
+        )
+
+        result = runtime.run(
+            MaintenanceRuntimeCommand(
+                iterations=1,
+                interval_seconds=0.0,
+                cleanup_non_final_artifacts=False,
+            )
+        )
+
+        self.assertEqual(cycle.calls, 1)
+        self.assertEqual(result.iterations_executed, 1)
+        self.assertEqual(result.recovered_total, 2)
+        self.assertEqual(result.expired_total, 1)
+        self.assertEqual(result.cleanup_deleted_total, 1)
+        self.assertEqual(result.failed_iterations, 1)
+        self.assertFalse(result.terminated_early)
+
+    def test_runtime_mixed_cycles_do_not_stop_before_threshold(self) -> None:
+        cycle = _MixedMaintenanceCycle()
+        runtime = MaintenanceRuntime(
+            run_maintenance_cycle=cycle,
+            logger=logging.getLogger("test.runtime.maintenance.mixed"),
+            sleep_fn=lambda _: None,
+        )
+
+        result = runtime.run(
+            MaintenanceRuntimeCommand(
+                iterations=2,
+                interval_seconds=0.0,
+                max_failed_iterations=2,
+                cleanup_non_final_artifacts=False,
+            )
+        )
+
+        self.assertEqual(cycle.calls, 2)
+        self.assertEqual(result.iterations_executed, 2)
+        self.assertEqual(result.failed_iterations, 1)
+        self.assertEqual(result.recovered_total, 5)
+        self.assertEqual(result.expired_total, 3)
+        self.assertEqual(result.cleanup_deleted_total, 3)
+        self.assertFalse(result.terminated_early)
+
+    def test_runtime_stops_early_when_partial_failures_reach_threshold(self) -> None:
+        sleep_calls: list[float] = []
+        cycle = _PartiallyFailingMaintenanceCycle()
+        runtime = MaintenanceRuntime(
+            run_maintenance_cycle=cycle,
+            logger=logging.getLogger("test.runtime.maintenance.partial_threshold"),
+            sleep_fn=lambda seconds: sleep_calls.append(seconds),
+        )
+
+        result = runtime.run(
+            MaintenanceRuntimeCommand(
+                iterations=5,
+                interval_seconds=0.5,
+                max_failed_iterations=2,
+                cleanup_non_final_artifacts=False,
+            )
+        )
+
+        self.assertEqual(cycle.calls, 2)
+        self.assertEqual(result.iterations_executed, 2)
+        self.assertEqual(result.failed_iterations, 2)
+        self.assertEqual(result.recovered_total, 4)
+        self.assertEqual(result.expired_total, 2)
+        self.assertEqual(result.cleanup_deleted_total, 2)
+        self.assertEqual(sleep_calls, [0.5])
+        self.assertTrue(result.terminated_early)
+
     def test_runtime_rejects_invalid_iterations(self) -> None:
         runtime = self._build_runtime(uow=InMemoryUnitOfWork(), storage=InMemoryFileStorage())
 
@@ -235,6 +469,15 @@ class MaintenanceRuntimeTests(unittest.TestCase):
 
         self.assertEqual(context.exception.code, "MAINTENANCE_MAX_FAILED_ITERATIONS_INVALID")
 
+    def test_runtime_rejects_invalid_max_stage_retry_attempts(self) -> None:
+        runtime = self._build_runtime(uow=InMemoryUnitOfWork(), storage=InMemoryFileStorage())
+
+        with self.assertRaises(BusinessRuleError) as context:
+            runtime.run(MaintenanceRuntimeCommand(max_stage_retry_attempts=0))
+
+        self.assertEqual(context.exception.code, "MAINTENANCE_STAGE_RETRY_ATTEMPTS_INVALID")
+
 
 if __name__ == "__main__":
     unittest.main()
+

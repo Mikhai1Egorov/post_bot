@@ -1,1 +1,1 @@
-﻿"""Pipeline modules."""
+"""Pipeline modules."""

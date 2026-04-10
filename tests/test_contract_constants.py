@@ -14,8 +14,8 @@ from post_bot.shared.constants import (  # noqa: E402
     INCLUDE_IMAGE_VALUES,
     REQUIRED_FIELDS,
     RESPONSE_LANGUAGE_VALUES,
-    SEARCH_LANGUAGE_VALUES,
 )
+
 
 class ContractConstantsTests(unittest.TestCase):
     def test_required_fields_are_present(self) -> None:
@@ -24,9 +24,8 @@ class ContractConstantsTests(unittest.TestCase):
             ("channel", "topic", "keywords", "time_range", "response_language", "mode"),
         )
 
-    def test_language_sets_have_seven_values(self) -> None:
+    def test_response_language_set_has_seven_values(self) -> None:
         expected = ("en", "ru", "uk", "es", "zh", "hi", "ar")
-        self.assertEqual(SEARCH_LANGUAGE_VALUES, expected)
         self.assertEqual(RESPONSE_LANGUAGE_VALUES, expected)
 
     def test_defaults_follow_contract(self) -> None:

@@ -1,4 +1,4 @@
-﻿"""Reserve balance use-case (PURCHASE -> RESERVE -> CONSUME model)."""
+"""Reserve balance use-case (PURCHASE -> RESERVE -> CONSUME model)."""
 
 from __future__ import annotations
 

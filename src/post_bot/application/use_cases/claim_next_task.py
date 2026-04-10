@@ -1,4 +1,4 @@
-﻿"""Worker-safe task claim use-case with billing consume."""
+"""Worker-safe task claim use-case with billing consume."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ class ClaimNextTaskUseCase:
                 self._uow.commit()
                 log_event(
                     self._logger,
-                    level=20,
+                    level=10,
                     module="application.orchestrator",
                     action="task_claim_empty",
                     result="success",

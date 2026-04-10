@@ -1,4 +1,4 @@
-﻿"""Upload intake use-case."""
+"""Upload intake use-case."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import sys
@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from post_bot.application.use_cases.claim_next_task import ClaimNextTaskUseCase  # noqa: E402
 from post_bot.application.use_cases.execute_claimed_task import ExecuteClaimedTaskUseCase  # noqa: E402
 from post_bot.application.use_cases.publish_task import PublishTaskUseCase  # noqa: E402
+from post_bot.application.use_cases.recover_stale_tasks import RecoverStaleTasksUseCase  # noqa: E402
 from post_bot.application.use_cases.run_task_generation import RunTaskGenerationUseCase  # noqa: E402
 from post_bot.application.use_cases.run_task_rendering import RunTaskRenderingUseCase  # noqa: E402
 from post_bot.application.use_cases.run_worker_cycle import RunWorkerCycleCommand, RunWorkerCycleUseCase  # noqa: E402
@@ -27,6 +28,7 @@ from post_bot.pipeline.modules.preparation import PreparationModule  # noqa: E40
 from post_bot.pipeline.modules.prompt_resolver import PromptResolverModule  # noqa: E402
 from post_bot.pipeline.modules.research import ResearchModule  # noqa: E402
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
+from post_bot.shared.errors import BusinessRuleError  # noqa: E402
 
 
 class _FailingClaimUseCase:
@@ -39,6 +41,18 @@ class _NoOpExecuteClaimedTaskUseCase:
     def execute(self, command):  # noqa: ANN001
         _ = command
         raise AssertionError("execute_claimed_task should not be called")
+
+
+class _FailingExecuteClaimedTaskUseCase:
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        raise RuntimeError("execute crashed")
+
+
+class _FailingExecuteWithAppErrorUseCase:
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        raise BusinessRuleError(code="EXECUTE_APP_ERROR", message="Execute app error")
 
 
 class RunWorkerCycleUseCaseTests(unittest.TestCase):
@@ -121,10 +135,12 @@ class RunWorkerCycleUseCaseTests(unittest.TestCase):
             logger=logging.getLogger("test.worker.execute"),
         )
         claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.worker.claim"))
+        recover = RecoverStaleTasksUseCase(uow=uow, logger=logging.getLogger("test.worker.recover"))
         return RunWorkerCycleUseCase(
             claim_next_task=claim,
             execute_claimed_task=execute,
             logger=logging.getLogger("test.worker.cycle"),
+            recover_stale_tasks=recover,
         )
 
     def test_cycle_instant_mode_finishes_done(self) -> None:
@@ -190,5 +206,52 @@ class RunWorkerCycleUseCaseTests(unittest.TestCase):
         self.assertIsNone(result.final_status)
         self.assertEqual(result.error_code, "WORKER_CYCLE_UNEXPECTED_ERROR")
 
+    def test_cycle_recovers_claimed_task_when_execute_crashes(self) -> None:
+        uow = InMemoryUnitOfWork()
+        self._seed_upload_and_task(uow, mode="instant")
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.worker.claim.crash"))
+        recover = RecoverStaleTasksUseCase(uow=uow, logger=logging.getLogger("test.worker.recover.crash"))
+        cycle = RunWorkerCycleUseCase(
+            claim_next_task=claim,
+            execute_claimed_task=_FailingExecuteClaimedTaskUseCase(),
+            logger=logging.getLogger("test.worker.cycle.crash"),
+            recover_stale_tasks=recover,
+        )
+
+        result = cycle.execute(RunWorkerCycleCommand(worker_id="worker-1", model_name="gpt-test"))
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.had_task)
+        self.assertEqual(result.task_id, 1)
+        self.assertEqual(result.final_status, TaskStatus.FAILED)
+        self.assertEqual(result.error_code, "WORKER_CYCLE_UNEXPECTED_ERROR")
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
+        self.assertEqual(uow.tasks.tasks[1].retry_count, 1)
+
+    def test_cycle_recovers_claimed_task_when_execute_raises_app_error(self) -> None:
+        uow = InMemoryUnitOfWork()
+        self._seed_upload_and_task(uow, mode="instant")
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.worker.claim.app_error"))
+        recover = RecoverStaleTasksUseCase(uow=uow, logger=logging.getLogger("test.worker.recover.app_error"))
+        cycle = RunWorkerCycleUseCase(
+            claim_next_task=claim,
+            execute_claimed_task=_FailingExecuteWithAppErrorUseCase(),
+            logger=logging.getLogger("test.worker.cycle.app_error"),
+            recover_stale_tasks=recover,
+        )
+
+        result = cycle.execute(RunWorkerCycleCommand(worker_id="worker-1", model_name="gpt-test"))
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.had_task)
+        self.assertEqual(result.task_id, 1)
+        self.assertEqual(result.final_status, TaskStatus.FAILED)
+        self.assertEqual(result.error_code, "EXECUTE_APP_ERROR")
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
+        self.assertEqual(uow.tasks.tasks[1].retry_count, 1)
+
 if __name__ == "__main__":
     unittest.main()
+

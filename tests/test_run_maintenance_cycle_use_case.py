@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 import logging
@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from post_bot.application.use_cases.cleanup_non_final_artifacts import (  # noqa: E402
+    CleanupNonFinalArtifactsResult,
     CleanupNonFinalArtifactsUseCase,
 )
 from post_bot.application.use_cases.expire_approval_batches import ExpireApprovalBatchesUseCase  # noqa: E402
@@ -32,6 +33,71 @@ from post_bot.shared.enums import (  # noqa: E402
     TaskStatus,
     UploadStatus,
 )
+from post_bot.shared.errors import BusinessRuleError, ExternalDependencyError  # noqa: E402
+
+
+class _FailingSelectRecoverableStaleTasks:
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        raise BusinessRuleError(
+            code="STALE_RECOVERY_WINDOW_INVALID",
+            message="older_than_minutes must be >= 1.",
+            details={"older_than_minutes": 0},
+        )
+
+
+class _ShouldNotBeCalled:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        raise AssertionError(f"{self._name} must not be called")
+
+
+class _StubCleanupNonFinalArtifacts:
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        return CleanupNonFinalArtifactsResult(
+            scanned_count=3,
+            deleted_count=2,
+            deleted_artifact_ids=(201, 202),
+        )
+
+
+class _FlakyRetryableCleanup:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        self.calls += 1
+        if self.calls == 1:
+            raise ExternalDependencyError(
+                code="CLEANUP_STORAGE_TEMPORARY_FAILURE",
+                message="Temporary storage failure.",
+                retryable=True,
+            )
+        return CleanupNonFinalArtifactsResult(
+            scanned_count=2,
+            deleted_count=1,
+            deleted_artifact_ids=(9001,),
+        )
+
+
+class _AlwaysRetryableCleanup:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, command):  # noqa: ANN001
+        _ = command
+        self.calls += 1
+        raise ExternalDependencyError(
+            code="CLEANUP_STORAGE_TEMPORARY_FAILURE",
+            message="Temporary storage failure.",
+            retryable=True,
+        )
+
 
 class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
 
@@ -120,6 +186,8 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
         self.assertEqual(result.expired_batch_ids, tuple())
         self.assertEqual(result.cleanup_scanned_count, 1)
         self.assertEqual(result.cleanup_deleted_count, 1)
+        self.assertEqual(result.failed_stage_count, 0)
+        self.assertEqual(result.failed_stages, tuple())
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.uploads.uploads[upload.id].upload_status, UploadStatus.FAILED)
 
@@ -245,6 +313,101 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
         self.assertEqual(result.expired_batch_ids, (old_batch.id,))
         self.assertEqual(uow.approval_batches.records[old_batch.id].batch_status, ApprovalBatchStatus.EXPIRED)
         self.assertEqual(uow.approval_batches.records[new_batch.id].batch_status, ApprovalBatchStatus.READY)
+
+    def test_continues_other_stages_when_selection_stage_fails(self) -> None:
+        use_case = RunMaintenanceCycleUseCase(
+            recover_stale_tasks=_ShouldNotBeCalled("recover_stale_tasks"),
+            select_recoverable_stale_tasks=_FailingSelectRecoverableStaleTasks(),
+            select_expirable_approval_batches=_ShouldNotBeCalled("select_expirable_approval_batches"),
+            expire_approval_batches=_ShouldNotBeCalled("expire_approval_batches"),
+            cleanup_non_final_artifacts=_StubCleanupNonFinalArtifacts(),
+            logger=logging.getLogger("test.maintenance.cycle.partial_failure"),
+        )
+
+        result = use_case.execute(
+            RunMaintenanceCycleCommand(
+                auto_recover_older_than_minutes=30,
+                cleanup_non_final_artifacts=True,
+            )
+        )
+
+        self.assertEqual(result.recovered_count, 0)
+        self.assertEqual(result.selected_stale_task_ids, tuple())
+        self.assertEqual(result.cleanup_scanned_count, 3)
+        self.assertEqual(result.cleanup_deleted_count, 2)
+        self.assertEqual(result.cleanup_deleted_artifact_ids, (201, 202))
+        self.assertEqual(result.failed_stage_count, 1)
+        self.assertEqual(result.failed_stages, ("select_recoverable_stale_tasks",))
+
+    def test_retries_retryable_stage_error_then_succeeds(self) -> None:
+        cleanup = _FlakyRetryableCleanup()
+        use_case = RunMaintenanceCycleUseCase(
+            recover_stale_tasks=_ShouldNotBeCalled("recover_stale_tasks"),
+            select_recoverable_stale_tasks=_ShouldNotBeCalled("select_recoverable_stale_tasks"),
+            select_expirable_approval_batches=_ShouldNotBeCalled("select_expirable_approval_batches"),
+            expire_approval_batches=_ShouldNotBeCalled("expire_approval_batches"),
+            cleanup_non_final_artifacts=cleanup,
+            logger=logging.getLogger("test.maintenance.cycle.retry_success"),
+        )
+
+        result = use_case.execute(
+            RunMaintenanceCycleCommand(
+                cleanup_non_final_artifacts=True,
+                max_stage_retry_attempts=2,
+            )
+        )
+
+        self.assertEqual(cleanup.calls, 2)
+        self.assertEqual(result.cleanup_scanned_count, 2)
+        self.assertEqual(result.cleanup_deleted_count, 1)
+        self.assertEqual(result.cleanup_deleted_artifact_ids, (9001,))
+        self.assertEqual(result.failed_stage_count, 0)
+        self.assertEqual(result.failed_stages, tuple())
+
+    def test_exhausts_retryable_stage_attempts_and_marks_stage_failed(self) -> None:
+        cleanup = _AlwaysRetryableCleanup()
+        use_case = RunMaintenanceCycleUseCase(
+            recover_stale_tasks=_ShouldNotBeCalled("recover_stale_tasks"),
+            select_recoverable_stale_tasks=_ShouldNotBeCalled("select_recoverable_stale_tasks"),
+            select_expirable_approval_batches=_ShouldNotBeCalled("select_expirable_approval_batches"),
+            expire_approval_batches=_ShouldNotBeCalled("expire_approval_batches"),
+            cleanup_non_final_artifacts=cleanup,
+            logger=logging.getLogger("test.maintenance.cycle.retry_exhausted"),
+        )
+
+        result = use_case.execute(
+            RunMaintenanceCycleCommand(
+                cleanup_non_final_artifacts=True,
+                max_stage_retry_attempts=3,
+            )
+        )
+
+        self.assertEqual(cleanup.calls, 3)
+        self.assertEqual(result.cleanup_scanned_count, 0)
+        self.assertEqual(result.cleanup_deleted_count, 0)
+        self.assertEqual(result.failed_stage_count, 1)
+        self.assertEqual(result.failed_stages, ("cleanup_non_final_artifacts",))
+
+    def test_rejects_invalid_stage_retry_attempts(self) -> None:
+        use_case = RunMaintenanceCycleUseCase(
+            recover_stale_tasks=_ShouldNotBeCalled("recover_stale_tasks"),
+            select_recoverable_stale_tasks=_ShouldNotBeCalled("select_recoverable_stale_tasks"),
+            select_expirable_approval_batches=_ShouldNotBeCalled("select_expirable_approval_batches"),
+            expire_approval_batches=_ShouldNotBeCalled("expire_approval_batches"),
+            cleanup_non_final_artifacts=_ShouldNotBeCalled("cleanup_non_final_artifacts"),
+            logger=logging.getLogger("test.maintenance.cycle.invalid_retry"),
+        )
+
+        with self.assertRaises(BusinessRuleError) as context:
+            use_case.execute(
+                RunMaintenanceCycleCommand(
+                    cleanup_non_final_artifacts=False,
+                    max_stage_retry_attempts=0,
+                )
+            )
+
+        self.assertEqual(context.exception.code, "MAINTENANCE_STAGE_RETRY_ATTEMPTS_INVALID")
+
 
 if __name__ == "__main__":
     unittest.main()

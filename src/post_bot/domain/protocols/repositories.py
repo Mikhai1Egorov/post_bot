@@ -127,7 +127,7 @@ class RenderRepository(Protocol):
         body_html: str,
         preview_text: str,
         slug_value: str,
-        html_storage_path: str,
+        html_storage_path: str | None,
     ) -> None: ...
 
     def mark_failed(self, render_id: int, *, error_code: str, error_message: str) -> None: ...
@@ -206,3 +206,4 @@ class UserActionRepository(Protocol):
         task_id: int | None = None,
         action_payload_json: dict[str, Any] | None = None,
     ) -> UserActionRecord: ...
+

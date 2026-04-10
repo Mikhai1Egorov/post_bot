@@ -52,6 +52,7 @@ Paragraph two.
         rendered = PostProcessingModule().render(task=self._task(), raw_output_text=raw)
 
         self.assertEqual(rendered.final_title_text, "Main title")
+        self.assertEqual(rendered.article_lead_text, "Paragraph one.")
         self.assertIn("<h1>Main title</h1>", rendered.body_html)
         self.assertIn("<h2>Section A</h2>", rendered.body_html)
         self.assertIn("<h3>Deep note</h3>", rendered.body_html)
@@ -65,16 +66,37 @@ Paragraph two.
         rendered = PostProcessingModule().render(
             task=self._task(include_image=True, footer=True, schedule=True),
             raw_output_text=raw,
+            image_url="data:image/png;base64,ZmFrZQ==",
         )
 
         self.assertIn("image-block", rendered.body_html)
-        self.assertIn("<footer>", rendered.body_html)
+        self.assertIn("data:image/png;base64,ZmFrZQ==", rendered.body_html)
+        self.assertIn("class=\"user-footer\"", rendered.body_html)
         self.assertIn("schedule-at", rendered.body_html)
         self.assertIn("https://example.com", rendered.body_html)
+
+    def test_include_image_without_generated_image_does_not_render_image_block(self) -> None:
+        rendered = PostProcessingModule().render(
+            task=self._task(include_image=True, footer=False, schedule=False),
+            raw_output_text="Title\nBody",
+            image_url=None,
+        )
+        self.assertNotIn("image-block", rendered.body_html)
+
+    def test_html_like_output_is_normalized_not_escaped(self) -> None:
+        raw = "<h1>Title</h1><p>Paragraph.</p><ul><li>One</li><li>Two</li></ul>"
+        rendered = PostProcessingModule().render(task=self._task(), raw_output_text=raw)
+
+        self.assertEqual(rendered.final_title_text, "Title")
+        self.assertIn("<h1>Title</h1>", rendered.body_html)
+        self.assertIn("<p>Paragraph.</p>", rendered.body_html)
+        self.assertIn("<li>One</li>", rendered.body_html)
+        self.assertNotIn("&lt;h1&gt;", rendered.body_html)
 
     def test_empty_output_raises(self) -> None:
         with self.assertRaises(ValidationError):
             PostProcessingModule().render(task=self._task(), raw_output_text="   \n   ")
+
 
 if __name__ == "__main__":
     unittest.main()

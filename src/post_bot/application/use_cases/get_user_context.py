@@ -1,4 +1,4 @@
-﻿"""Read-only user context resolution by Telegram identity."""
+"""Read-only user context resolution by Telegram identity."""
 
 from __future__ import annotations
 

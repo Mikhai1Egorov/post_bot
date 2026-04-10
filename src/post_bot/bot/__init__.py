@@ -1,1 +1,1 @@
-﻿"""Telegram transport layer."""
+"""Telegram transport layer."""

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import logging
 import sys
 from pathlib import Path
@@ -128,6 +129,39 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         self.assertEqual(history[1].old_status, TaskStatus.QUEUED)
         self.assertEqual(history[1].new_status, TaskStatus.PREPARING)
 
+
+    def test_claim_next_task_respects_schedule_at(self) -> None:
+        uow, _, upload_id, rows = self._prepare_validated_upload()
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=44, available_articles_count=5, reserved_articles_count=0, consumed_articles_total=0)
+        )
+        reserve = ReserveBalanceUseCase(uow=uow, logger=logging.getLogger("test.reserve"))
+        reserve.execute(ReserveBalanceCommand(upload_id=upload_id))
+
+        create = TaskCreationUseCase(uow=uow, logger=logging.getLogger("test.create_tasks"))
+        create_result = create.execute(TaskCreationCommand(upload_id=upload_id, normalized_rows=rows))
+        task_id = create_result.created_task_ids[0]
+
+        now = datetime.now(UTC).replace(tzinfo=None)
+        task = uow.tasks.tasks[task_id]
+        uow.tasks.tasks[task_id] = replace(task, scheduled_publish_at=now + timedelta(minutes=5))
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.claim.schedule"))
+        not_due_result = claim.execute(ClaimNextTaskCommand(worker_id="w-schedule"))
+        self.assertIsNone(not_due_result.task)
+
+        balance_before_due = uow.balances.snapshots[44]
+        self.assertEqual(balance_before_due.available_articles_count, 4)
+        self.assertEqual(balance_before_due.reserved_articles_count, 1)
+        self.assertEqual(balance_before_due.consumed_articles_total, 0)
+
+        uow.tasks.tasks[task_id] = replace(uow.tasks.tasks[task_id], scheduled_publish_at=now - timedelta(minutes=1))
+
+        due_result = claim.execute(ClaimNextTaskCommand(worker_id="w-schedule"))
+        self.assertIsNotNone(due_result.task)
+        self.assertEqual(due_result.task.id, task_id)
+        self.assertEqual(uow.tasks.tasks[task_id].task_status, TaskStatus.PREPARING)
+
     def test_claim_requeued_task_is_claimable_without_double_consume(self) -> None:
         uow = InMemoryUnitOfWork()
         upload = uow.uploads.create_received(user_id=44, original_filename="tasks.xlsx", storage_path="memory://upload")
@@ -240,3 +274,5 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

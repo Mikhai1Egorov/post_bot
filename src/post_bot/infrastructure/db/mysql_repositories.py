@@ -1,4 +1,4 @@
-﻿"""MySQL repository implementations for Unit of Work."""
+"""MySQL repository implementations for Unit of Work."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from post_bot.domain.models import (
     UploadValidationErrorItem,
     UserActionRecord,
 )
+from post_bot.domain.transitions import is_task_final
 from post_bot.shared.enums import (
     ApprovalBatchStatus,
     ArtifactType,
@@ -343,7 +344,6 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                     custom_title,
                     keywords_text,
                     source_time_range,
-                    source_language_code,
                     response_language_code,
                     style_code,
                     content_length_code,
@@ -357,7 +357,7 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                     task_status,
                     retry_count,
                     last_error_message
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     task.upload_id,
@@ -367,7 +367,6 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                     task.custom_title or None,
                     task.keywords_text or None,
                     task.source_time_range or None,
-                    task.source_language_code,
                     task.response_language_code,
                     task.style_code or None,
                     task.content_length_code or None,
@@ -442,6 +441,10 @@ class MySQLTaskRepository(_BaseMySQLRepository):
             SELECT id
             FROM tasks
             WHERE task_status IN (%s, %s)
+              AND (
+                    scheduled_publish_at IS NULL
+                    OR scheduled_publish_at <= NOW()
+                  )
             ORDER BY CASE task_status WHEN %s THEN 0 ELSE 1 END, id
             LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -457,6 +460,13 @@ class MySQLTaskRepository(_BaseMySQLRepository):
         return self._map_task(claimed)
 
     def set_task_status(self, task_id: int, status: TaskStatus, *, changed_by: str, reason: str | None) -> None:
+        _ = (changed_by, reason)
+        if is_task_final(status):
+            self._execute(
+                "UPDATE tasks SET task_status = %s, completed_at = COALESCE(completed_at, UTC_TIMESTAMP()) WHERE id = %s",
+                (status.value, task_id),
+            )
+            return
         self._execute("UPDATE tasks SET task_status = %s WHERE id = %s", (status.value, task_id))
 
     def set_task_billing_state(self, task_id: int, billing_state: TaskBillingState) -> None:
@@ -483,7 +493,7 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                 COALESCE(t.custom_title, ''),
                 COALESCE(t.keywords_text, ''),
                 COALESCE(t.source_time_range, '24h'),
-                t.source_language_code,
+                NULL AS source_language_code,
                 t.response_language_code,
                 COALESCE(t.style_code, 'journalistic'),
                 COALESCE(t.content_length_code, 'medium'),
@@ -496,7 +506,8 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                 t.billing_state,
                 t.task_status,
                 t.retry_count,
-                t.last_error_message
+                t.last_error_message,
+                t.completed_at
             FROM tasks t
         """
 
@@ -530,6 +541,7 @@ class MySQLTaskRepository(_BaseMySQLRepository):
             task_status=TaskStatus(str(row[19])),
             retry_count=int(row[20] or 0),
             last_error_message=str(row[21]) if row[21] is not None else None,
+            completed_at=row[22],
         )
 
 
@@ -819,7 +831,8 @@ class MySQLGenerationRepository(_BaseMySQLRepository):
 
 class MySQLRenderRepository(_BaseMySQLRepository):
     def create_started(self, *, task_id: int) -> TaskRenderRecord:
-        render_id = self._execute_insert(
+        # schema.sql enforces UNIQUE(task_id) for task_renders, so we reset existing row on retries.
+        self._execute(
             """
             INSERT INTO task_renders (
                 task_id,
@@ -832,15 +845,26 @@ class MySQLRenderRepository(_BaseMySQLRepository):
                 error_message,
                 render_status
             ) VALUES (%s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, %s)
+            ON DUPLICATE KEY UPDATE
+                final_title_text = VALUES(final_title_text),
+                body_html = VALUES(body_html),
+                preview_text = VALUES(preview_text),
+                slug_value = VALUES(slug_value),
+                html_storage_path = VALUES(html_storage_path),
+                error_code = VALUES(error_code),
+                error_message = VALUES(error_message),
+                render_status = VALUES(render_status)
             """,
             (
                 task_id,
                 RenderStatus.STARTED.value,
             ),
         )
-        row = self._fetchone(self._select_render_sql(), (render_id,))
+        row = self._fetchone(
+            self._select_render_base_sql() + " WHERE r.task_id = %s ORDER BY r.id DESC LIMIT 1",
+            (task_id,),
+        )
         return self._map_render(row)
-
     def mark_succeeded(
         self,
         render_id: int,
@@ -849,7 +873,7 @@ class MySQLRenderRepository(_BaseMySQLRepository):
         body_html: str,
         preview_text: str,
         slug_value: str,
-        html_storage_path: str,
+        html_storage_path: str | None,
     ) -> None:
         self._execute(
             """
@@ -1382,12 +1406,4 @@ class MySQLUserActionRepository(_BaseMySQLRepository):
             task_id=int(row[5]) if row[5] is not None else None,
             action_payload_json=_json_loads(row[6]),
         )
-
-
-
-
-
-
-
-
 

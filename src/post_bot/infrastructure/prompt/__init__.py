@@ -1,1 +1,1 @@
-﻿"""Prompt resource loading adapters."""
+"""Prompt resource loading adapters."""
