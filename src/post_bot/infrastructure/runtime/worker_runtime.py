@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from logging import Logger
 from time import sleep
+import traceback
 from typing import Callable
 
 from post_bot.application.use_cases.run_worker_cycle import RunWorkerCycleCommand, RunWorkerCycleUseCase
-from post_bot.shared.errors import BusinessRuleError
+from post_bot.shared.errors import BusinessRuleError, InternalError
 from post_bot.shared.logging import TimedLog, log_event
 
 
@@ -71,10 +72,46 @@ class WorkerRuntime:
         terminated_early = False
 
         while True:
-            cycle = self._run_worker_cycle.execute(
-                RunWorkerCycleCommand(worker_id=command.worker_id, model_name=command.model_name)
-            )
-            cycles += 1
+            try:
+                cycle = self._run_worker_cycle.execute(
+                    RunWorkerCycleCommand(worker_id=command.worker_id, model_name=command.model_name)
+                )
+                cycles += 1
+            except Exception as error:  # noqa: BLE001
+                cycles += 1
+                failed_cycles += 1
+                internal = InternalError(
+                    code="WORKER_RUNTIME_CYCLE_UNEXPECTED_ERROR",
+                    message="Unexpected exception escaped worker cycle execution.",
+                    details={
+                        "worker_id": command.worker_id,
+                        "cycle_number": cycles,
+                        "error": str(error),
+                        "exception_type": type(error).__name__,
+                        "exception_repr": repr(error),
+                        "traceback": traceback.format_exc()[:4000],
+                    },
+                )
+                log_event(
+                    self._logger,
+                    level=40,
+                    module="infrastructure.runtime.worker_runtime",
+                    action="worker_cycle_crashed",
+                    result="failure",
+                    error=internal,
+                    extra={
+                        "worker_id": command.worker_id,
+                        "cycle_number": cycles,
+                    },
+                )
+                if command.max_failed_cycles is not None and failed_cycles >= command.max_failed_cycles:
+                    terminated_early = True
+                    break
+                if command.max_cycles is not None and cycles >= command.max_cycles:
+                    break
+                if command.idle_sleep_seconds > 0:
+                    self._sleep_fn(command.idle_sleep_seconds)
+                continue
 
             if cycle.had_task:
                 tasks_processed += 1

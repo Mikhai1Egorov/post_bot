@@ -20,7 +20,6 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
     FakePublisher,
     FakeResearchClient,
     InMemoryFileStorage,
-    InMemoryPromptLoader,
     InMemoryUnitOfWork,
 )
 from post_bot.pipeline.modules.post_processing import PostProcessingModule  # noqa: E402
@@ -56,17 +55,6 @@ class _FailingExecuteWithAppErrorUseCase:
 
 
 class RunWorkerCycleUseCaseTests(unittest.TestCase):
-    def _resources(self) -> dict[str, str]:
-        return {
-            "SYSTEM_INSTRUCTIONS.txt": "SYSTEM",
-            "JOURNALIST_PROMPT_STYLE.txt": "STYLE JOURNALISTIC",
-            "SIMPLE_PROMPT_STYLE.txt": "STYLE SIMPLE",
-            "EXPERT_PROMPT_STYLE.txt": "STYLE EXPERT",
-            "MASTER_PROMPT_TEMPLATE.txt": "Topic={topic}; Title={title}; Keywords={keywords}",
-            "CONTENT_LENGTH_RULES.txt": "LENGTH RULES",
-            "LENGTH-BLOCKS.txt": "OPTIONAL RULES",
-        }
-
     def _seed_upload_and_task(self, uow: InMemoryUnitOfWork, *, mode: str) -> int:
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
@@ -192,7 +180,7 @@ class RunWorkerCycleUseCaseTests(unittest.TestCase):
             uow=uow,
             preparation=PreparationModule(),
             research=ResearchModule(FakeResearchClient()),
-            prompt_resolver=PromptResolverModule(loader=InMemoryPromptLoader(self._resources())),
+            prompt_resolver=PromptResolverModule(),
             llm_client=llm,
             logger=logging.getLogger("test.worker.generation"),
         )

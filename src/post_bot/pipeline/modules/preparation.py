@@ -11,13 +11,9 @@ from post_bot.shared.errors import InternalError
 @dataclass(slots=True, frozen=True)
 class PreparedTaskPayload:
     task_id: int
-    topic: str
     title: str
     keywords: str
-    time_range: str
     response_language: str
-    style: str
-    length: str
     include_image: bool
     footer_text: str | None
     footer_link: str | None
@@ -29,13 +25,9 @@ class PreparationModule:
 
     def prepare(self, task: Task) -> PreparedTaskPayload:
         required_text_fields = {
-            "topic_text": task.topic_text,
             "custom_title": task.custom_title,
             "keywords_text": task.keywords_text,
-            "source_time_range": task.source_time_range,
             "response_language_code": task.response_language_code,
-            "style_code": task.style_code,
-            "content_length_code": task.content_length_code,
             "publish_mode": task.publish_mode,
         }
         for field_name, value in required_text_fields.items():
@@ -48,13 +40,9 @@ class PreparationModule:
 
         return PreparedTaskPayload(
             task_id=task.id,
-            topic=task.topic_text,
             title=task.custom_title,
             keywords=task.keywords_text,
-            time_range=task.source_time_range,
             response_language=task.response_language_code,
-            style=task.style_code,
-            length=task.content_length_code,
             include_image=task.include_image_flag,
             footer_text=task.footer_text,
             footer_link=task.footer_link_url,

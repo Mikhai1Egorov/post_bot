@@ -54,7 +54,9 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.worker_count, 4)
         self.assertEqual(config.default_interface_language, InterfaceLanguage.EN)
         self.assertIsNone(config.openai_api_key)
+        self.assertIsNone(config.stability_api_key)
         self.assertEqual(config.openai_research_model, "gpt-4.1-mini")
+        self.assertEqual(config.openai_generation_model, "gpt-4.1-mini")
         self.assertEqual(config.outbound_timeout_seconds, 15.0)
         self.assertIsNone(config.telegram_bot_token)
         self.assertEqual(config.telegram_poll_timeout_seconds, 30)
@@ -70,7 +72,9 @@ class AppConfigTests(unittest.TestCase):
                     "DB_USER": "svc",
                     "DB_PASSWORD": "secret",
                     "OPENAI_API_KEY": "sk-test",
+                    "STABILITY_API_KEY": "stability-test",
                     "OPENAI_RESEARCH_MODEL": "gpt-5-mini",
+                    "OPENAI_GENERATION_MODEL": "gpt-5.1-mini",
                     "OUTBOUND_TIMEOUT_SECONDS": "22.5",
                     "DEFAULT_INTERFACE_LANGUAGE": "ru",
                     "WORKER_COUNT": "8",
@@ -88,7 +92,9 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.db_user, "svc")
         self.assertEqual(config.db_password, "secret")
         self.assertEqual(config.openai_api_key, "sk-test")
+        self.assertEqual(config.stability_api_key, "stability-test")
         self.assertEqual(config.openai_research_model, "gpt-5-mini")
+        self.assertEqual(config.openai_generation_model, "gpt-5.1-mini")
         self.assertEqual(config.outbound_timeout_seconds, 22.5)
         self.assertEqual(config.default_interface_language, InterfaceLanguage.RU)
         self.assertEqual(config.worker_count, 8)
@@ -108,6 +114,7 @@ class AppConfigTests(unittest.TestCase):
                         "DB_USER=dotenv_user",
                         "DB_PASSWORD=dotenv_pass",
                         "OPENAI_RESEARCH_MODEL=gpt-4.1-mini",
+                        "OPENAI_GENERATION_MODEL=gpt-4.1-mini",
                     ]
                 ),
                 encoding="utf-8",
@@ -143,6 +150,7 @@ class AppConfigTests(unittest.TestCase):
                         "DB_USER=dotenv_user",
                         "DB_PASSWORD=dotenv_pass",
                         "OPENAI_RESEARCH_MODEL=gpt-4.1-mini",
+                        "OPENAI_GENERATION_MODEL=gpt-4.1-mini",
                     ]
                 ),
                 encoding="utf-8",
@@ -158,6 +166,7 @@ class AppConfigTests(unittest.TestCase):
                     "DB_USER": "runtime-user",
                     "DB_PASSWORD": "runtime-pass",
                     "OPENAI_RESEARCH_MODEL": "gpt-5-mini",
+                    "OPENAI_GENERATION_MODEL": "gpt-5.3-mini",
                 },
                 clear=True,
             ):
@@ -171,6 +180,7 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.db_user, "runtime-user")
         self.assertEqual(config.db_password, "runtime-pass")
         self.assertEqual(config.openai_research_model, "gpt-5-mini")
+        self.assertEqual(config.openai_generation_model, "gpt-5.3-mini")
 
     def test_from_env_rejects_missing_db_user(self) -> None:
         with patch.dict(
@@ -241,6 +251,26 @@ class AppConfigTests(unittest.TestCase):
                 AppConfig.from_env()
 
         self.assertEqual(context.exception.code, "CONFIG_OPENAI_RESEARCH_MODEL_REQUIRED")
+
+    def test_from_env_rejects_empty_generation_model(self) -> None:
+        with patch.dict(
+            os.environ,
+            _with_disabled_dotenv(
+                {
+                    "DB_HOST": "localhost",
+                    "DB_PORT": "3306",
+                    "DB_NAME": "postbot",
+                    "DB_USER": "user",
+                    "DB_PASSWORD": "pass",
+                    "OPENAI_GENERATION_MODEL": "   ",
+                }
+            ),
+            clear=True,
+        ):
+            with self.assertRaises(ValidationError) as context:
+                AppConfig.from_env()
+
+        self.assertEqual(context.exception.code, "CONFIG_OPENAI_GENERATION_MODEL_REQUIRED")
 
     def test_from_env_rejects_invalid_timeout(self) -> None:
         with patch.dict(

@@ -21,11 +21,18 @@ class ResearchModule:
     def __init__(self, client: ResearchClientPort) -> None:
         self._client = client
 
+    @property
+    def model_name(self) -> str | None:
+        raw = getattr(self._client, "model_name", None)
+        if isinstance(raw, str):
+            normalized = raw.strip()
+            return normalized or None
+        return None
+
     def collect(self, *, payload: PreparedTaskPayload, task_id: int) -> ResearchResult:
         raw_sources = self._client.collect(
-            topic=payload.topic,
+            title=payload.title,
             keywords=payload.keywords,
-            time_range=payload.time_range,
         )
         normalized_sources: list[TaskResearchSource] = []
         lines: list[str] = []

@@ -31,15 +31,14 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
 
         parser = FakeExcelTaskParser(
             ParsedExcelData(
-                headers=("channel", "topic", "keywords", "time_range", "response_language", "mode"),
+                headers=("channel", "title", "keywords", "response_language", "mode"),
                 rows=(
                     ParsedExcelRow(
                         excel_row=2,
                         values={
                             "channel": "@news",
-                            "topic": "AI adoption",
+                            "title": "AI adoption",
                             "keywords": "ai, automation",
-                            "time_range": "24h",
                             "response_language": "en",
                             "mode": "instant",
                         },
@@ -390,7 +389,7 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         reserve.execute(ReserveBalanceCommand(upload_id=upload_id))
 
         base = rows[0]
-        expanded = tuple(replace(base, topic=f"AI adoption #{i}", title=f"AI adoption #{i}") for i in range(1, 13))
+        expanded = tuple(replace(base, title=f"AI adoption #{i}") for i in range(1, 13))
 
         # Keep upload counters consistent with new rows for this isolated concurrency test.
         uow.uploads.update_validation_counters(

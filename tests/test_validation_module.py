@@ -9,6 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from post_bot.domain.models import ParsedExcelData, ParsedExcelRow  # noqa: E402
 from post_bot.pipeline.modules.validation import ExcelContractValidator  # noqa: E402
+from post_bot.shared.constants import (  # noqa: E402
+    MAX_INPUT_FIELD_CHARS,
+    MAX_KEYWORDS_CHARS,
+    MAX_TITLE_CHARS,
+)
 
 
 class ValidationModuleTests(unittest.TestCase):
@@ -38,8 +43,6 @@ class ValidationModuleTests(unittest.TestCase):
         self.assertEqual(len(result.errors), 0)
         self.assertEqual(result.valid_rows_count, 1)
         row = result.normalized_rows[0]
-        self.assertEqual(row.style, "journalistic")
-        self.assertEqual(row.length, "medium")
         self.assertFalse(row.include_image)
         self.assertEqual(row.title, "AI adoption")
         self.assertIsNone(row.schedule_at)
@@ -311,6 +314,382 @@ class ValidationModuleTests(unittest.TestCase):
         self.assertEqual(len(result.errors), 0)
         self.assertEqual(result.valid_rows_count, 1)
         self.assertEqual(result.normalized_rows[0].channel, "-1003941546628")
+
+    def test_rejects_too_long_prompt_fields(self) -> None:
+        parsed = ParsedExcelData(
+            headers=(
+                "channel",
+                "topic",
+                "title",
+                "keywords",
+                "time_range",
+                "response_language",
+                "mode",
+                "footer_text",
+                "footer_link",
+            ),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "topic": "legacy topic",
+                        "title": "x" * (MAX_TITLE_CHARS + 1),
+                        "keywords": "k" * (MAX_KEYWORDS_CHARS + 1),
+                        "time_range": "7d",
+                        "response_language": "ru",
+                        "mode": "instant",
+                        "footer_text": "f" * (MAX_INPUT_FIELD_CHARS + 1),
+                        "footer_link": "h" * (MAX_INPUT_FIELD_CHARS + 1),
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=12, parsed=parsed)
+
+        self.assertEqual(result.valid_rows_count, 0)
+        too_long = [item for item in result.errors if item.error_code == "FIELD_TOO_LONG"]
+        self.assertGreaterEqual(len(too_long), 4)
+        self.assertTrue(any(item.column_name == "title" for item in too_long))
+        self.assertTrue(any(item.column_name == "keywords" for item in too_long))
+        self.assertTrue(any(item.column_name == "footer_text" for item in too_long))
+        self.assertTrue(any(item.column_name == "footer_link" for item in too_long))
+
+    def test_accepts_prompt_fields_on_max_boundary(self) -> None:
+        parsed = ParsedExcelData(
+            headers=(
+                "channel",
+                "topic",
+                "title",
+                "keywords",
+                "time_range",
+                "response_language",
+                "mode",
+                "footer_text",
+                "footer_link",
+            ),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "topic": "legacy topic",
+                        "title": "x" * MAX_TITLE_CHARS,
+                        "keywords": "k" * MAX_KEYWORDS_CHARS,
+                        "time_range": "24h",
+                        "response_language": "en",
+                        "mode": "instant",
+                        "footer_text": "f" * MAX_INPUT_FIELD_CHARS,
+                        "footer_link": "h" * MAX_INPUT_FIELD_CHARS,
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=13, parsed=parsed)
+
+        self.assertEqual(result.valid_rows_count, 1)
+        self.assertFalse(any(item.error_code == "FIELD_TOO_LONG" for item in result.errors))
+
+    def test_optional_fields_empty_do_not_trigger_length_error(self) -> None:
+        parsed = ParsedExcelData(
+            headers=(
+                "channel",
+                "topic",
+                "title",
+                "keywords",
+                "time_range",
+                "response_language",
+                "mode",
+                "footer_text",
+                "footer_link",
+            ),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "topic": "AI adoption",
+                        "title": "",
+                        "keywords": "ai, automation",
+                        "time_range": "24h",
+                        "response_language": "en",
+                        "mode": "instant",
+                        "footer_text": "",
+                        "footer_link": "",
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=14, parsed=parsed)
+
+        self.assertEqual(result.valid_rows_count, 1)
+        self.assertFalse(any(item.error_code == "FIELD_TOO_LONG" for item in result.errors))
+
+    def test_field_length_boundaries_all_supported_fields(self) -> None:
+        field_names = ("title", "keywords", "footer_text", "footer_link")
+        for field_name in field_names:
+            with self.subTest(field_name=field_name, boundary=199):
+                parsed = ParsedExcelData(
+                    headers=(
+                        "channel",
+                        "topic",
+                        "title",
+                        "keywords",
+                        "time_range",
+                        "response_language",
+                        "mode",
+                        "footer_text",
+                        "footer_link",
+                    ),
+                    rows=(
+                        ParsedExcelRow(
+                            excel_row=2,
+                            values={
+                                "channel": "@news",
+                                "topic": "AI adoption",
+                                "title": "My title",
+                                "keywords": "ai",
+                                "time_range": "24h",
+                                "response_language": "en",
+                                "mode": "instant",
+                                "footer_text": "footer",
+                                "footer_link": "https://example.com",
+                                field_name: "x" * 199,
+                            },
+                        ),
+                    ),
+                )
+                result = self.validator.validate(upload_id=15, parsed=parsed)
+                self.assertEqual(result.valid_rows_count, 1)
+                self.assertFalse(any(item.error_code == "FIELD_TOO_LONG" for item in result.errors))
+
+            with self.subTest(field_name=field_name, boundary=200):
+                parsed = ParsedExcelData(
+                    headers=(
+                        "channel",
+                        "topic",
+                        "title",
+                        "keywords",
+                        "time_range",
+                        "response_language",
+                        "mode",
+                        "footer_text",
+                        "footer_link",
+                    ),
+                    rows=(
+                        ParsedExcelRow(
+                            excel_row=2,
+                            values={
+                                "channel": "@news",
+                                "topic": "AI adoption",
+                                "title": "My title",
+                                "keywords": "ai",
+                                "time_range": "24h",
+                                "response_language": "en",
+                                "mode": "instant",
+                                "footer_text": "footer",
+                                "footer_link": "https://example.com",
+                                field_name: "x" * 200,
+                            },
+                        ),
+                    ),
+                )
+                result = self.validator.validate(upload_id=16, parsed=parsed)
+                self.assertEqual(result.valid_rows_count, 1)
+                self.assertFalse(any(item.error_code == "FIELD_TOO_LONG" for item in result.errors))
+
+            with self.subTest(field_name=field_name, boundary=201):
+                parsed = ParsedExcelData(
+                    headers=(
+                        "channel",
+                        "topic",
+                        "title",
+                        "keywords",
+                        "time_range",
+                        "response_language",
+                        "mode",
+                        "footer_text",
+                        "footer_link",
+                    ),
+                    rows=(
+                        ParsedExcelRow(
+                            excel_row=2,
+                            values={
+                                "channel": "@news",
+                                "topic": "AI adoption",
+                                "title": "My title",
+                                "keywords": "ai",
+                                "time_range": "24h",
+                                "response_language": "en",
+                                "mode": "instant",
+                                "footer_text": "footer",
+                                "footer_link": "https://example.com",
+                                field_name: "x" * 201,
+                            },
+                        ),
+                    ),
+                )
+                result = self.validator.validate(upload_id=17, parsed=parsed)
+                self.assertEqual(result.valid_rows_count, 0)
+                self.assertTrue(
+                    any(
+                        item.error_code == "FIELD_TOO_LONG" and item.column_name == field_name
+                        for item in result.errors
+                    )
+                )
+
+    def test_collects_multiple_length_errors_in_single_row(self) -> None:
+        parsed = ParsedExcelData(
+            headers=("channel", "topic", "title", "keywords", "time_range", "response_language", "mode"),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=5,
+                    values={
+                        "channel": "@news",
+                        "topic": "AI adoption",
+                        "title": "t" * (MAX_INPUT_FIELD_CHARS + 1),
+                        "keywords": "k" * (MAX_INPUT_FIELD_CHARS + 1),
+                        "time_range": "24h",
+                        "response_language": "en",
+                        "mode": "instant",
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=18, parsed=parsed)
+
+        row_five_errors = [item for item in result.errors if item.excel_row == 5 and item.error_code == "FIELD_TOO_LONG"]
+        self.assertEqual(len(row_five_errors), 2)
+        self.assertEqual({item.column_name for item in row_five_errors}, {"title", "keywords"})
+
+    def test_collects_length_errors_across_multiple_rows(self) -> None:
+        parsed = ParsedExcelData(
+            headers=("channel", "topic", "keywords", "time_range", "response_language", "mode"),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "topic": "t" * (MAX_INPUT_FIELD_CHARS + 1),
+                        "keywords": "ai",
+                        "time_range": "24h",
+                        "response_language": "en",
+                        "mode": "instant",
+                    },
+                ),
+                ParsedExcelRow(
+                    excel_row=7,
+                    values={
+                        "channel": "@news",
+                        "topic": "AI adoption",
+                        "keywords": "k" * (MAX_INPUT_FIELD_CHARS + 1),
+                        "time_range": "24h",
+                        "response_language": "en",
+                        "mode": "instant",
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=19, parsed=parsed)
+
+        self.assertEqual(result.valid_rows_count, 0)
+        self.assertTrue(any(item.excel_row == 2 and item.column_name == "title" for item in result.errors))
+        self.assertTrue(any(item.excel_row == 7 and item.column_name == "keywords" for item in result.errors))
+
+    def test_new_contract_without_topic_is_valid(self) -> None:
+        parsed = ParsedExcelData(
+            headers=("channel", "title", "keywords", "response_language", "mode"),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "title": "AI adoption",
+                        "keywords": "ai, automation",
+                        "response_language": "en",
+                        "mode": "instant",
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=20, parsed=parsed)
+        self.assertEqual(len(result.errors), 0)
+        self.assertEqual(result.valid_rows_count, 1)
+        self.assertEqual(result.normalized_rows[0].title, "AI adoption")
+
+    def test_requires_title_in_new_contract_when_topic_absent(self) -> None:
+        parsed = ParsedExcelData(
+            headers=("channel", "keywords", "response_language", "mode"),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "keywords": "ai, automation",
+                        "response_language": "en",
+                        "mode": "instant",
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=21, parsed=parsed)
+        self.assertEqual(result.valid_rows_count, 0)
+        self.assertTrue(
+            any(item.error_code == "MISSING_REQUIRED_COLUMN" and item.column_name == "title" for item in result.errors)
+        )
+
+    def test_fallback_uses_legacy_topic_when_title_empty(self) -> None:
+        parsed = ParsedExcelData(
+            headers=("channel", "topic", "title", "keywords", "response_language", "mode"),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "topic": "Legacy topic title",
+                        "title": "",
+                        "keywords": "ai, automation",
+                        "response_language": "en",
+                        "mode": "instant",
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=22, parsed=parsed)
+        self.assertEqual(len(result.errors), 0)
+        self.assertEqual(result.valid_rows_count, 1)
+        self.assertEqual(result.normalized_rows[0].title, "Legacy topic title")
+
+    def test_title_has_priority_over_legacy_topic(self) -> None:
+        parsed = ParsedExcelData(
+            headers=("channel", "topic", "title", "keywords", "response_language", "mode"),
+            rows=(
+                ParsedExcelRow(
+                    excel_row=2,
+                    values={
+                        "channel": "@news",
+                        "topic": "Legacy topic",
+                        "title": "New title",
+                        "keywords": "ai, automation",
+                        "response_language": "en",
+                        "mode": "instant",
+                    },
+                ),
+            ),
+        )
+
+        result = self.validator.validate(upload_id=23, parsed=parsed)
+        self.assertEqual(len(result.errors), 0)
+        self.assertEqual(result.valid_rows_count, 1)
+        self.assertEqual(result.normalized_rows[0].title, "New title")
 
 
 if __name__ == "__main__":

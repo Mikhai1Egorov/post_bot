@@ -12,7 +12,7 @@ from post_bot.shared.errors import ExternalDependencyError, ValidationError
 
 
 class OpenPyxlTaskParser:
-    """Parses worksheet rows using A:M contract and legacy A:N compatibility."""
+    """Parses worksheet rows and supports current and legacy Excel layouts."""
 
     def parse(self, payload: bytes) -> ParsedExcelData:
         try:
@@ -27,15 +27,14 @@ class OpenPyxlTaskParser:
         workbook = openpyxl.load_workbook(filename=BytesIO(payload), data_only=True)
         worksheet = workbook.active
 
-        contract_columns = len(ALL_FIELDS)
-        legacy_columns = contract_columns + 1
+        max_scan_columns = max(32, len(ALL_FIELDS) + 4)
 
         header_row = next(
             worksheet.iter_rows(
                 min_row=1,
                 max_row=1,
                 min_col=1,
-                max_col=legacy_columns,
+                max_col=max_scan_columns,
                 values_only=True,
             ),
             None,
@@ -47,8 +46,7 @@ class OpenPyxlTaskParser:
         if all(not header for header in candidate_headers):
             raise ValidationError(code="EXCEL_HEADER_MISSING", message="Excel header row is missing.")
 
-        use_legacy_layout = self._is_legacy_layout(candidate_headers, legacy_columns=legacy_columns)
-        active_columns = legacy_columns if use_legacy_layout else contract_columns
+        active_columns = self._detect_active_columns(candidate_headers)
         headers = candidate_headers[:active_columns]
 
         empty_columns = [index + 1 for index, header in enumerate(headers) if not header]
@@ -82,12 +80,12 @@ class OpenPyxlTaskParser:
         return ParsedExcelData(headers=headers, rows=tuple(rows))
 
     @staticmethod
-    def _is_legacy_layout(headers: tuple[str, ...], *, legacy_columns: int) -> bool:
-        if len(headers) < legacy_columns:
-            return False
-        legacy_headers = headers[:legacy_columns]
-        # Legacy template had an extra `search_language` column and `mode` at N.
-        return "search_language" in legacy_headers and "mode" in legacy_headers
+    def _detect_active_columns(headers: tuple[str, ...]) -> int:
+        last_non_empty_index = 0
+        for index, value in enumerate(headers, start=1):
+            if value:
+                last_non_empty_index = index
+        return last_non_empty_index
 
     @staticmethod
     def _normalize_header_cell(value: Any) -> str:

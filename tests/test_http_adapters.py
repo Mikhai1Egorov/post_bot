@@ -152,7 +152,7 @@ class ExternalAdaptersTests(unittest.TestCase):
                 }
             ),
         ) as mocked_open:
-            result = client.collect(topic="AI", keywords="ai", time_range="24h")
+            result = client.collect(title="AI", keywords="ai")
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].source_url, "https://example.com/a")
@@ -181,7 +181,7 @@ class ExternalAdaptersTests(unittest.TestCase):
             ),
         ):
             with self.assertRaises(ExternalDependencyError) as context:
-                client.collect(topic="AI", keywords="ai", time_range="24h")
+                client.collect(title="AI", keywords="ai")
 
         self.assertEqual(context.exception.code, "RESEARCH_RESPONSE_INVALID")
         self.assertFalse(context.exception.retryable)
@@ -510,10 +510,10 @@ class ExternalAdaptersTests(unittest.TestCase):
         self.assertIn("Title", str(gateway.photo_calls[0]["caption"] or ""))
         self.assertIn("Lead paragraph", str(gateway.photo_calls[0]["caption"] or ""))
         body_text = str(gateway.calls[0]["text"])
+        self.assertIn("Title", body_text)
+        self.assertIn("Lead paragraph", body_text)
         self.assertIn("Section A", body_text)
         self.assertIn("Read more https://example.com", body_text)
-        self.assertNotIn("Title", str(gateway.calls[0]["text"]))
-        self.assertNotIn("Lead paragraph", str(gateway.calls[0]["text"]))
         self.assertTrue(bool(payload["photo_sent"]))
         self.assertEqual(payload["publisher_branch"], "send_photo_then_messages")
         self.assertEqual(payload["article_chunks_count"], 1)
@@ -560,6 +560,28 @@ class ExternalAdaptersTests(unittest.TestCase):
         self.assertGreater(len(gateway.calls), 1)
         self.assertTrue(all(len(str(call["text"])) <= 4000 for call in gateway.calls))
         self.assertTrue(any("Section 1" in str(call["text"]) for call in gateway.calls))
+
+    def test_telegram_publisher_does_not_truncate_long_unbroken_tokens(self) -> None:
+        gateway = _FakeTelegramGateway()
+        publisher = TelegramBotPublisher(gateway=gateway)
+
+        long_token = "a" * 4505
+        _external_id, payload = publisher.publish(
+            channel="@news",
+            html=(
+                "<article><h1>Title</h1>"
+                "<h2>Section</h2>"
+                f"<p>{long_token}</p>"
+                "</article>"
+            ),
+            scheduled_for=None,
+        )
+
+        self.assertGreaterEqual(len(gateway.calls), 2)
+        sent_text = "\n".join(str(call["text"]) for call in gateway.calls)
+        self.assertNotIn("…", sent_text)
+        self.assertIn("Section", sent_text)
+        self.assertTrue(payload["article_text_chars"] >= len(long_token))
 
     def test_telegram_publisher_uses_binary_sendphoto_for_data_uri(self) -> None:
         gateway = _FakeTelegramGateway(return_message_ids=True)
@@ -723,6 +745,53 @@ class ExternalAdaptersTests(unittest.TestCase):
         self.assertEqual(error.code, "TELEGRAM_HTTP_ERROR")
         self.assertTrue(error.retryable)
         self.assertEqual(error.details.get("status"), 503)
+
+    def test_telegram_publisher_network_error_exposes_original_exception(self) -> None:
+        publisher = TelegramBotPublisher(bot_token="123:abc")
+
+        with patch(
+            "post_bot.infrastructure.external.telegram_publisher.urlopen",
+            side_effect=URLError("Temporary failure in name resolution"),
+        ):
+            with self.assertRaises(ExternalDependencyError) as context:
+                publisher.publish(
+                    channel="@news",
+                    html="<article><h1>Title</h1><p>Hello</p></article>",
+                    scheduled_for=None,
+                )
+
+        error = context.exception
+        self.assertEqual(error.code, "TELEGRAM_NETWORK_ERROR")
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.details.get("method"), "sendMessage")
+        self.assertIsNone(error.details.get("status"))
+        self.assertIsNone(error.details.get("body"))
+        self.assertEqual(error.details.get("exception_type"), "URLError")
+        self.assertIn("URLError", str(error.details.get("exception_repr")))
+        self.assertIn("Temporary failure", str(error.details.get("reason")))
+
+    def test_telegram_publisher_timeout_error_detected_from_urlerror_reason(self) -> None:
+        publisher = TelegramBotPublisher(bot_token="123:abc")
+
+        with patch(
+            "post_bot.infrastructure.external.telegram_publisher.urlopen",
+            side_effect=URLError(TimeoutError("read timed out")),
+        ):
+            with self.assertRaises(ExternalDependencyError) as context:
+                publisher.publish(
+                    channel="@news",
+                    html="<article><h1>Title</h1><p>Hello</p></article>",
+                    scheduled_for=None,
+                )
+
+        error = context.exception
+        self.assertEqual(error.code, "TELEGRAM_TIMEOUT")
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.details.get("method"), "sendMessage")
+        self.assertIsNone(error.details.get("status"))
+        self.assertIsNone(error.details.get("body"))
+        self.assertEqual(error.details.get("reason_type"), "TimeoutError")
+        self.assertEqual(error.details.get("exception_type"), "URLError")
 
 
 if __name__ == "__main__":

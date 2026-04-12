@@ -10,7 +10,6 @@ from post_bot.application.ports import (
     ArtifactStoragePort,
     ImageClientPort,
     LLMClientPort,
-    PromptResourceLoaderPort,
     PublisherPort,
     ResearchClientPort,
 )
@@ -37,7 +36,6 @@ from post_bot.infrastructure.external import (
     OpenAIResearchClient,
     TelegramBotPublisher,
 )
-from post_bot.infrastructure.prompt.file_prompt_loader import FilePromptResourceLoader
 from post_bot.infrastructure.runtime.maintenance_runtime import MaintenanceRuntime
 from post_bot.infrastructure.runtime.worker_runtime import WorkerRuntime
 from post_bot.infrastructure.storage.local_file_storage import LocalFileStorage
@@ -52,14 +50,15 @@ from post_bot.shared.errors import ExternalDependencyError
 class UnconfiguredResearchClient:
     """Explicitly fails when OpenAI token is not configured."""
 
+    model_name: str = "unconfigured"
+
     def collect(
         self,
         *,
-        topic: str,
+        title: str,
         keywords: str,
-        time_range: str,
     ) -> list[TaskResearchSource]:
-        _ = (topic, keywords, time_range)
+        _ = (title, keywords)
         raise ExternalDependencyError(
             code="OPENAI_API_KEY_REQUIRED",
             message="OPENAI_API_KEY is required for research stage.",
@@ -80,7 +79,7 @@ class UnconfiguredLLMClient:
 
 
 class UnconfiguredImageClient:
-    """Explicitly fails when OpenAI token is not configured."""
+    """Explicitly fails when image provider token is not configured."""
 
     def generate_cover(
         self,
@@ -92,8 +91,8 @@ class UnconfiguredImageClient:
     ):
         _ = (task_id, article_title, article_topic, article_lead)
         raise ExternalDependencyError(
-            code="OPENAI_API_KEY_REQUIRED",
-            message="OPENAI_API_KEY is required for image generation stage.",
+            code="IMAGE_API_KEY_REQUIRED",
+            message="STABILITY_API_KEY is required for image generation stage.",
             retryable=False,
         )
 
@@ -104,7 +103,6 @@ class RuntimeWiring:
 
     uow: UnitOfWork
     artifact_storage: ArtifactStoragePort
-    prompt_loader: PromptResourceLoaderPort
     research_client: ResearchClientPort
     llm_client: LLMClientPort
     image_client: ImageClientPort
@@ -133,7 +131,6 @@ def build_default_runtime_wiring(
             database=config.db_name,
         ),
         artifact_storage=LocalFileStorage(storage_root),
-        prompt_loader=FilePromptResourceLoader(root),
         research_client=research_client or _build_research_client(config),
         llm_client=llm_client or _build_llm_client(config),
         image_client=image_client or _build_image_client(config),
@@ -161,11 +158,13 @@ def _build_llm_client(config: AppConfig) -> LLMClientPort:
 
 
 def _build_image_client(config: AppConfig) -> ImageClientPort:
-    if not config.openai_api_key:
+    image_api_key = config.stability_api_key
+    if not image_api_key:
         return UnconfiguredImageClient()
     return OpenAIImageClient(
-        api_key=config.openai_api_key,
+        api_key=image_api_key,
         model_name=config.openai_image_model,
+        api_key_source="STABILITY_API_KEY",
         timeout_seconds=config.outbound_timeout_seconds,
     )
 
@@ -184,7 +183,7 @@ def build_worker_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> Wo
         uow=wiring.uow,
         preparation=PreparationModule(),
         research=ResearchModule(wiring.research_client),
-        prompt_resolver=PromptResolverModule(loader=wiring.prompt_loader),
+        prompt_resolver=PromptResolverModule(),
         llm_client=wiring.llm_client,
         logger=logger.getChild("generation"),
     )

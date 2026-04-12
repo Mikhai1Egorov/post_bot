@@ -211,10 +211,14 @@ class PublishTaskUseCase:
             if isinstance(payload, dict):
                 publish_trace.update(
                     {
+                        "resolved_chat_id": payload.get("resolved_chat_id"),
                         "publisher_branch": payload.get("publisher_branch"),
                         "photo_sent": payload.get("photo_sent"),
                         "image_delivery_kind": payload.get("image_delivery_kind"),
                         "image_fallback_reason": payload.get("image_fallback_reason"),
+                        "article_text_chars": payload.get("article_text_chars"),
+                        "cover_caption_chars": payload.get("cover_caption_chars"),
+                        "article_chunks_count": payload.get("article_chunks_count"),
                     }
                 )
 
@@ -318,6 +322,7 @@ class PublishTaskUseCase:
             final_status = self._uow.tasks.get_by_id_for_update(task.id)
 
         log_level = 30 if error.retryable else 40
+        error_diagnostics = self._extract_error_diagnostics(error=error, resume_payload_json=resume_payload_json)
         log_event(
             self._logger,
             level=log_level,
@@ -335,6 +340,21 @@ class PublishTaskUseCase:
                 "max_retry_attempts": TASK_MAX_RETRY_ATTEMPTS,
                 "next_attempt_at": next_attempt_at.isoformat(sep=" ") if next_attempt_at is not None else None,
                 "user_error_code": user_error_code,
+                "telegram_method": error_diagnostics.get("telegram_method"),
+                "telegram_status": error_diagnostics.get("telegram_status"),
+                "telegram_reason": error_diagnostics.get("telegram_reason"),
+                "telegram_body": error_diagnostics.get("telegram_body"),
+                "telegram_exception_type": error_diagnostics.get("telegram_exception_type"),
+                "telegram_reason_type": error_diagnostics.get("telegram_reason_type"),
+                "telegram_exception_repr": error_diagnostics.get("telegram_exception_repr"),
+                "resolved_chat_id": error_diagnostics.get("resolved_chat_id"),
+                "publisher_branch": error_diagnostics.get("publisher_branch"),
+                "photo_sent": error_diagnostics.get("photo_sent"),
+                "image_delivery_kind": error_diagnostics.get("image_delivery_kind"),
+                "article_text_chars": error_diagnostics.get("article_text_chars"),
+                "cover_caption_chars": error_diagnostics.get("cover_caption_chars"),
+                "article_chunks_count": error_diagnostics.get("article_chunks_count"),
+                "polling_conflict_suspected": error_diagnostics.get("polling_conflict_suspected"),
             },
         )
         return PublishTaskResult(
@@ -358,6 +378,80 @@ class PublishTaskUseCase:
         if isinstance(resume_payload_json, dict):
             return resume_payload_json
         return None
+
+    @classmethod
+    def _extract_error_diagnostics(
+        cls,
+        *,
+        error: AppError,
+        resume_payload_json: dict[str, Any] | None,
+    ) -> dict[str, object | None]:
+        details = error.details if isinstance(error.details, dict) else {}
+        payload = cls._resolve_failure_payload_json(error=error, resume_payload_json=resume_payload_json)
+        if not isinstance(payload, dict):
+            payload = {}
+
+        body = details.get("body")
+        body_text = str(body) if body is not None else None
+        body_compact = body_text[:1000] if body_text else None
+
+        status_raw = details.get("status")
+        status: int | None = None
+        if status_raw is not None:
+            try:
+                status = int(status_raw)
+            except (TypeError, ValueError):
+                status = None
+
+        method = details.get("method")
+        reason = details.get("reason")
+        exception_type = details.get("exception_type")
+        reason_type = details.get("reason_type")
+        exception_repr = details.get("exception_repr")
+
+        method_text = str(method) if method is not None else None
+        reason_text = str(reason) if reason is not None else None
+        exception_type_text = str(exception_type) if exception_type is not None else None
+        reason_type_text = str(reason_type) if reason_type is not None else None
+        exception_repr_text = str(exception_repr) if exception_repr is not None else None
+
+        polling_conflict_suspected = cls._is_polling_conflict_error(
+            status=status,
+            body=body_compact,
+            reason=reason_text,
+            method=method_text,
+        )
+
+        return {
+            "telegram_method": method_text,
+            "telegram_status": status,
+            "telegram_reason": reason_text,
+            "telegram_body": body_compact,
+            "telegram_exception_type": exception_type_text,
+            "telegram_reason_type": reason_type_text,
+            "telegram_exception_repr": exception_repr_text,
+            "resolved_chat_id": payload.get("resolved_chat_id"),
+            "publisher_branch": payload.get("publisher_branch"),
+            "photo_sent": payload.get("photo_sent"),
+            "image_delivery_kind": payload.get("image_delivery_kind"),
+            "article_text_chars": payload.get("article_text_chars"),
+            "cover_caption_chars": payload.get("cover_caption_chars"),
+            "article_chunks_count": payload.get("article_chunks_count"),
+            "polling_conflict_suspected": polling_conflict_suspected,
+        }
+
+    @staticmethod
+    def _is_polling_conflict_error(
+        *,
+        status: int | None,
+        body: str | None,
+        reason: str | None,
+        method: str | None,
+    ) -> bool:
+        if status != 409:
+            return False
+        haystack = " ".join(part for part in (body, reason, method) if part is not None).casefold()
+        return "getupdates" in haystack or "terminated by other getupdates request" in haystack
 
     @classmethod
     def _resolve_user_facing_error_code(cls, error: AppError) -> str:

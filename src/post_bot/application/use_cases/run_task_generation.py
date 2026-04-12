@@ -10,7 +10,7 @@ from post_bot.application.retry_backoff import calculate_next_attempt_at
 from post_bot.application.task_transitions import transition_task_status
 from post_bot.application.upload_status import resolve_upload_status_from_tasks
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
-from post_bot.pipeline.modules.preparation import PreparationModule
+from post_bot.pipeline.modules.preparation import PreparationModule, PreparedTaskPayload
 from post_bot.pipeline.modules.prompt_resolver import PromptResolverModule
 from post_bot.pipeline.modules.research import ResearchModule
 from post_bot.shared.constants import TASK_MAX_RETRY_ATTEMPTS
@@ -56,6 +56,17 @@ class RunTaskGenerationUseCase:
     def execute(self, command: RunTaskGenerationCommand) -> RunTaskGenerationResult:
         timer = TimedLog()
         generation_id: int | None = None
+        stage: str = "research"
+        model: str = self._resolve_research_model_name()
+        retry_attempt: int | None = None
+        upload_id: int | None = None
+        user_id: int | None = None
+        stage_timer: TimedLog | None = None
+        prompt_chars: int | None = None
+        prompt_estimated_tokens: int | None = None
+        research_context_chars: int | None = None
+        response_chars: int | None = None
+        response_estimated_tokens: int | None = None
 
         try:
             with self._uow:
@@ -89,6 +100,9 @@ class RunTaskGenerationUseCase:
                         details={"task_id": command.task_id, "task_status": task.task_status.value},
                     )
 
+                retry_attempt = task.retry_count
+                upload_id = task.upload_id
+                user_id = task.user_id
                 prepared = self._preparation.prepare(task)
                 transition_task_status(
                     uow=self._uow,
@@ -99,15 +113,74 @@ class RunTaskGenerationUseCase:
                 )
                 self._uow.commit()
 
+            research_prompt = self._build_research_prompt_text(prepared)
+            prompt_chars = len(research_prompt)
+            prompt_estimated_tokens = self._estimate_tokens(research_prompt)
+            response_chars = None
+            response_estimated_tokens = None
+            log_event(
+                self._logger,
+                level=20,
+                module="application.run_task_generation",
+                action="llm_request_started",
+                result="success",
+                status_before=TaskStatus.RESEARCHING.value,
+                status_after=TaskStatus.RESEARCHING.value,
+                extra={
+                    "task_id": command.task_id,
+                    "stage": stage,
+                    "model": model,
+                    "retry_attempt": retry_attempt,
+                    "prompt_chars": prompt_chars,
+                    "research_context_chars": research_context_chars,
+                    "response_chars": response_chars,
+                    "estimated_prompt_tokens": prompt_estimated_tokens,
+                    "estimated_response_tokens": response_estimated_tokens,
+                    "upload_id": upload_id,
+                    "user_id": user_id,
+                },
+            )
+            stage_timer = TimedLog()
             research_result = self._research.collect(payload=prepared, task_id=command.task_id)
+            research_context_chars = len(research_result.context_text or "")
+            response_chars = research_context_chars
+            response_estimated_tokens = self._estimate_tokens(research_result.context_text or "")
+            log_event(
+                self._logger,
+                level=20,
+                module="application.run_task_generation",
+                action="llm_request_finished",
+                result="success",
+                status_before=TaskStatus.RESEARCHING.value,
+                status_after=TaskStatus.RESEARCHING.value,
+                duration_ms=stage_timer.elapsed_ms(),
+                extra={
+                    "task_id": command.task_id,
+                    "stage": stage,
+                    "model": model,
+                    "retry_attempt": retry_attempt,
+                    "prompt_chars": prompt_chars,
+                    "research_context_chars": research_context_chars,
+                    "response_chars": response_chars,
+                    "estimated_prompt_tokens": prompt_estimated_tokens,
+                    "estimated_response_tokens": response_estimated_tokens,
+                    "research_sources_count": len(research_result.sources),
+                    "upload_id": upload_id,
+                    "user_id": user_id,
+                },
+            )
             with self._uow:
                 self._uow.research_sources.replace_for_task(command.task_id, list(research_result.sources))
                 self._uow.commit()
 
-            resolved_prompt = self._prompt_resolver.resolve(
-                payload=prepared,
-                research_context=research_result.context_text,
-            )
+            stage = "generation"
+            model = command.model_name
+            stage_timer = None
+            resolved_prompt = self._prompt_resolver.resolve(payload=prepared)
+            prompt_chars = len(resolved_prompt.final_prompt_text)
+            prompt_estimated_tokens = self._estimate_tokens(resolved_prompt.final_prompt_text)
+            response_chars = None
+            response_estimated_tokens = None
 
             with self._uow:
                 transition_task_status(
@@ -135,13 +208,29 @@ class RunTaskGenerationUseCase:
                 result="success",
                 status_before=TaskStatus.GENERATING.value,
                 status_after=TaskStatus.GENERATING.value,
-                extra={"task_id": command.task_id, "generation_id": generation_id, "model_name": command.model_name},
+                extra={
+                    "task_id": command.task_id,
+                    "stage": stage,
+                    "model": model,
+                    "retry_attempt": retry_attempt,
+                    "generation_id": generation_id,
+                    "prompt_chars": prompt_chars,
+                    "estimated_prompt_tokens": prompt_estimated_tokens,
+                    "research_context_chars": research_context_chars,
+                    "response_chars": response_chars,
+                    "estimated_response_tokens": response_estimated_tokens,
+                    "upload_id": upload_id,
+                    "user_id": user_id,
+                },
             )
+            stage_timer = TimedLog()
             raw_output = self._llm_client.generate(
                 model_name=command.model_name,
                 prompt=resolved_prompt.final_prompt_text,
                 response_language=prepared.response_language,
             )
+            response_chars = len(raw_output)
+            response_estimated_tokens = self._estimate_tokens(raw_output)
 
             with self._uow:
                 self._uow.generations.mark_succeeded(generation_id, raw_output_text=raw_output)
@@ -162,12 +251,22 @@ class RunTaskGenerationUseCase:
                 result="success",
                 status_before=TaskStatus.GENERATING.value,
                 status_after=TaskStatus.RENDERING.value,
-                duration_ms=timer.elapsed_ms(),
+                duration_ms=stage_timer.elapsed_ms() if stage_timer is not None else timer.elapsed_ms(),
                 extra={
                     "task_id": command.task_id,
+                    "stage": stage,
+                    "model": model,
+                    "retry_attempt": retry_attempt,
                     "generation_id": generation_id,
                     "generation_status": GenerationStatus.SUCCEEDED.value,
                     "research_sources_count": len(research_result.sources),
+                    "prompt_chars": prompt_chars,
+                    "estimated_prompt_tokens": prompt_estimated_tokens,
+                    "research_context_chars": research_context_chars,
+                    "response_chars": response_chars,
+                    "estimated_response_tokens": response_estimated_tokens,
+                    "upload_id": upload_id,
+                    "user_id": user_id,
                 },
             )
             return RunTaskGenerationResult(
@@ -180,14 +279,44 @@ class RunTaskGenerationUseCase:
             )
 
         except AppError as error:
-            return self._handle_failure(command=command, generation_id=generation_id, error=error, duration_ms=timer.elapsed_ms())
+            return self._handle_failure(
+                command=command,
+                generation_id=generation_id,
+                error=error,
+                stage=stage,
+                model=model,
+                retry_attempt=retry_attempt,
+                upload_id=upload_id,
+                user_id=user_id,
+                duration_ms=stage_timer.elapsed_ms() if stage_timer is not None else timer.elapsed_ms(),
+                prompt_chars=prompt_chars,
+                prompt_estimated_tokens=prompt_estimated_tokens,
+                research_context_chars=research_context_chars,
+                response_chars=response_chars,
+                response_estimated_tokens=response_estimated_tokens,
+            )
         except Exception as error:  # noqa: BLE001
             internal = InternalError(
                 code="GENERATION_UNEXPECTED_ERROR",
                 message="Unexpected generation error.",
                 details={"task_id": command.task_id, "error": str(error)},
             )
-            return self._handle_failure(command=command, generation_id=generation_id, error=internal, duration_ms=timer.elapsed_ms())
+            return self._handle_failure(
+                command=command,
+                generation_id=generation_id,
+                error=internal,
+                stage=stage,
+                model=model,
+                retry_attempt=retry_attempt,
+                upload_id=upload_id,
+                user_id=user_id,
+                duration_ms=stage_timer.elapsed_ms() if stage_timer is not None else timer.elapsed_ms(),
+                prompt_chars=prompt_chars,
+                prompt_estimated_tokens=prompt_estimated_tokens,
+                research_context_chars=research_context_chars,
+                response_chars=response_chars,
+                response_estimated_tokens=response_estimated_tokens,
+            )
 
     def _handle_failure(
         self,
@@ -195,7 +324,17 @@ class RunTaskGenerationUseCase:
         command: RunTaskGenerationCommand,
         generation_id: int | None,
         error: AppError,
+        stage: str,
+        model: str | None,
+        retry_attempt: int | None,
+        upload_id: int | None,
+        user_id: int | None,
         duration_ms: int,
+        prompt_chars: int | None,
+        prompt_estimated_tokens: int | None,
+        research_context_chars: int | None,
+        response_chars: int | None,
+        response_estimated_tokens: int | None,
     ) -> RunTaskGenerationResult:
         with self._uow:
             task = self._uow.tasks.get_by_id_for_update(command.task_id)
@@ -246,11 +385,21 @@ class RunTaskGenerationUseCase:
             error=error,
             extra={
                 "task_id": command.task_id,
+                "stage": stage,
+                "model": model,
+                "retry_attempt": retry_attempt,
                 "generation_id": generation_id,
                 "queued_for_retry": queue_for_retry,
                 "retry_count": retry_count,
                 "max_retry_attempts": TASK_MAX_RETRY_ATTEMPTS,
                 "next_attempt_at": next_attempt_at.isoformat(sep=" ") if next_attempt_at is not None else None,
+                "prompt_chars": prompt_chars,
+                "estimated_prompt_tokens": prompt_estimated_tokens,
+                "research_context_chars": research_context_chars,
+                "response_chars": response_chars,
+                "estimated_response_tokens": response_estimated_tokens,
+                "upload_id": upload_id,
+                "user_id": user_id,
             },
         )
         return RunTaskGenerationResult(
@@ -260,4 +409,30 @@ class RunTaskGenerationUseCase:
             task_status=status_after,
             retryable=error.retryable,
             error_code=error.code,
+        )
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        return max(1, (len(text) + 3) // 4)
+
+    def _resolve_research_model_name(self) -> str:
+        model_name = self._research.model_name
+        if model_name is None:
+            return "unknown"
+        return model_name
+
+    @staticmethod
+    def _build_research_prompt_text(payload: PreparedTaskPayload) -> str:
+        return (
+            "You are a research assistant. Return only JSON. "
+            "Find concise, relevant web sources for the requested topic.\n\n"
+            "Return JSON object with key 'sources'. "
+            "Each source item must be object with fields: "
+            "source_url (required string), source_title (optional string|null), "
+            "source_language_code (optional string|null), published_at (optional ISO datetime string|null), "
+            "source_payload_json (optional object|null). "
+            f"title={payload.title}; keywords={payload.keywords}. "
+            "Return max 5 items. No markdown."
         )

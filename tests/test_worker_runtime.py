@@ -21,7 +21,6 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
     FakePublisher,
     FakeResearchClient,
     InMemoryFileStorage,
-    InMemoryPromptLoader,
     InMemoryUnitOfWork,
 )
 from post_bot.pipeline.modules.post_processing import PostProcessingModule  # noqa: E402
@@ -62,6 +61,13 @@ class _AlwaysFailingTaskCycle:
         )
 
 
+class _RaisingCycle:
+    @staticmethod
+    def execute(command):  # noqa: ANN001
+        _ = command
+        raise RuntimeError("boom")
+
+
 class _FailingExecuteWithAppErrorUseCase:
     def execute(self, command):  # noqa: ANN001
         _ = command
@@ -69,21 +75,8 @@ class _FailingExecuteWithAppErrorUseCase:
 
 
 class WorkerRuntimeTests(unittest.TestCase):
-
     @staticmethod
-    def _resources() -> dict[str, str]:
-        return {
-            "SYSTEM_INSTRUCTIONS.txt": "SYSTEM",
-            "JOURNALIST_PROMPT_STYLE.txt": "STYLE JOURNALISTIC",
-            "SIMPLE_PROMPT_STYLE.txt": "STYLE SIMPLE",
-            "EXPERT_PROMPT_STYLE.txt": "STYLE EXPERT",
-            "MASTER_PROMPT_TEMPLATE.txt": "Topic={topic}; Title={title}; Keywords={keywords}",
-            "CONTENT_LENGTH_RULES.txt": "LENGTH RULES",
-            "LENGTH-BLOCKS.txt": "OPTIONAL RULES",
-        }
-
-    @staticmethod
-    def _seed_upload_and_task(uow: InMemoryUnitOfWork, *, style: str = "journalistic") -> None:
+    def _seed_upload_and_task(uow: InMemoryUnitOfWork) -> None:
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
         uow.uploads.set_billing_status(upload.id, UploadBillingStatus.RESERVED)
@@ -105,11 +98,11 @@ class WorkerRuntimeTests(unittest.TestCase):
             topic_text="AI adoption",
             custom_title="AI adoption in 2026",
             keywords_text="ai, automation",
-            source_time_range="24h",
+            source_time_range="",
             source_language_code="en",
             response_language_code="en",
-            style_code=style,
-            content_length_code="medium",
+            style_code="",
+            content_length_code="",
             include_image_flag=False,
             footer_text=None,
             footer_link_url=None,
@@ -128,7 +121,7 @@ class WorkerRuntimeTests(unittest.TestCase):
             uow=uow,
             preparation=PreparationModule(),
             research=ResearchModule(FakeResearchClient()),
-            prompt_resolver=PromptResolverModule(loader=InMemoryPromptLoader(self._resources())),
+            prompt_resolver=PromptResolverModule(),
             llm_client=llm,
             logger=logging.getLogger("test.runtime.worker.generation"),
         )
@@ -197,8 +190,11 @@ class WorkerRuntimeTests(unittest.TestCase):
 
     def test_runtime_counts_failed_cycles(self) -> None:
         uow = InMemoryUnitOfWork()
-        self._seed_upload_and_task(uow, style="unsupported")
-        runtime = self._build_runtime(uow=uow, llm=FakeLLMClient(response_text="unused"))
+        self._seed_upload_and_task(uow)
+        runtime = self._build_runtime(
+            uow=uow,
+            llm=FakeLLMClient(error=BusinessRuleError(code="LLM_FAIL", message="forced failure")),
+        )
 
         result = runtime.run(WorkerRuntimeCommand(worker_id="worker-1", model_name="gpt-test", max_cycles=10))
 
@@ -215,6 +211,19 @@ class WorkerRuntimeTests(unittest.TestCase):
         )
 
         result = runtime.run(WorkerRuntimeCommand(worker_id="worker-1", model_name="gpt-test", max_cycles=5))
+
+        self.assertEqual(result.cycles_executed, 1)
+        self.assertEqual(result.tasks_processed, 0)
+        self.assertEqual(result.failed_cycles, 1)
+        self.assertFalse(result.terminated_early)
+
+    def test_runtime_handles_cycle_exception_without_crash(self) -> None:
+        runtime = WorkerRuntime(
+            run_worker_cycle=_RaisingCycle(),
+            logger=logging.getLogger("test.runtime.worker.cycle_exception"),
+        )
+
+        result = runtime.run(WorkerRuntimeCommand(worker_id="worker-1", model_name="gpt-test", max_cycles=1))
 
         self.assertEqual(result.cycles_executed, 1)
         self.assertEqual(result.tasks_processed, 0)

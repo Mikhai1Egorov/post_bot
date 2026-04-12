@@ -36,17 +36,12 @@ class ExcelTaskParserPort(Protocol):
     def parse(self, payload: bytes) -> ParsedExcelData: ...
 
 
-class PromptResourceLoaderPort(Protocol):
-    def load(self, resource_name: str) -> str: ...
-
-
 class ResearchClientPort(Protocol):
     def collect(
         self,
         *,
-        topic: str,
+        title: str,
         keywords: str,
-        time_range: str,
     ) -> list[TaskResearchSource]: ...
 
 

@@ -50,6 +50,7 @@ class LocalizationTests(unittest.TestCase):
             "VALIDATION_ERRORS_TITLE",
             "VALIDATION_ERROR_ROW",
             "VALIDATION_ERROR_ITEM",
+            "VALIDATION_FIELD_TOO_LONG",
             "VALIDATION_REUPLOAD_HINT",
             "INSUFFICIENT_BALANCE",
             "INSUFFICIENT_BALANCE_WITH_COUNTS",

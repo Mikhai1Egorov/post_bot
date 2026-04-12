@@ -27,7 +27,9 @@ def _config() -> AppConfig:
         worker_count=1,
         default_interface_language=InterfaceLanguage.EN,
         openai_api_key=None,
-        openai_research_model="gpt-4.1-mini",
+        stability_api_key=None,
+        openai_research_model="gpt-4.1-nano",
+        openai_generation_model="gpt-4.1-nano",
         outbound_timeout_seconds=15.0,
         telegram_bot_token="token-123",
         telegram_poll_timeout_seconds=30,
@@ -47,6 +49,12 @@ class _FakeWorkerRuntime:
     def run(self, command):  # noqa: ANN001
         self.last_command = command
         return self.result
+
+
+class _InterruptWorkerRuntime:
+    def run(self, command):  # noqa: ANN001
+        _ = command
+        raise KeyboardInterrupt()
 
 
 class _FakeMaintenanceRuntime:
@@ -297,6 +305,32 @@ class RuntimeEntrypointsTests(unittest.TestCase):
             exit_code = worker_entrypoint.main()
 
         self.assertEqual(exit_code, 1)
+
+    def test_worker_entrypoint_returns_130_on_keyboard_interrupt(self) -> None:
+        from post_bot.infrastructure.runtime import worker_entrypoint
+
+        with (
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.AppConfig.from_env", return_value=_config()),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.configure_logging"),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.ensure_runtime_dependencies"),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.build_default_runtime_wiring", return_value=object()),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.run_startup_recovery_pass"),
+            patch("post_bot.infrastructure.runtime.worker_entrypoint.build_worker_runtime", return_value=_InterruptWorkerRuntime()),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "post-bot-worker",
+                    "--worker-id",
+                    "w-1",
+                    "--model-name",
+                    "gpt-test",
+                ],
+            ),
+        ):
+            exit_code = worker_entrypoint.main()
+
+        self.assertEqual(exit_code, 130)
 
     def test_maintenance_entrypoint_parses_ids_and_runs_runtime(self) -> None:
         from post_bot.infrastructure.runtime import maintenance_entrypoint

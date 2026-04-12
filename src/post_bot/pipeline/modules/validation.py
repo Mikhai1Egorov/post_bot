@@ -10,16 +10,17 @@ from post_bot.domain.models import NormalizedTaskConfig, ParsedExcelData, Upload
 from post_bot.shared.constants import (
     ALL_FIELDS,
     DEFAULT_INCLUDE_IMAGE,
-    DEFAULT_LENGTH,
-    DEFAULT_STYLE,
+    IGNORED_LEGACY_FIELDS,
+    MAX_FOOTER_LINK_CHARS,
     INCLUDE_IMAGE_VALUES,
-    LENGTH_VALUES,
+    MAX_FOOTER_TEXT_CHARS,
+    MAX_KEYWORDS_CHARS,
+    MAX_TITLE_CHARS,
     REQUIRED_FIELDS,
     RESPONSE_LANGUAGE_VALUES,
     SCHEDULE_DATETIME_FORMAT,
-    STYLE_VALUES,
 )
-from post_bot.shared.enums import IncludeImageExcelValue, PublishMode, TimeRange
+from post_bot.shared.enums import IncludeImageExcelValue, PublishMode
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,7 +43,7 @@ class ExcelContractValidator:
         errors: list[UploadValidationErrorItem] = []
         normalized_rows: list[NormalizedTaskConfig] = []
 
-        known_headers = set(ALL_FIELDS) | {"search_language"}
+        known_headers = set(ALL_FIELDS) | set(IGNORED_LEGACY_FIELDS)
         provided_headers = set(parsed.headers)
 
         for header in sorted(provided_headers - known_headers):
@@ -58,6 +59,9 @@ class ExcelContractValidator:
             )
 
         for header in REQUIRED_FIELDS:
+            if header == "title" and "topic" in provided_headers:
+                # Legacy compatibility: old template can provide topic instead of title.
+                continue
             if header not in provided_headers:
                 errors.append(
                     UploadValidationErrorItem(
@@ -81,13 +85,9 @@ class ExcelContractValidator:
 
             key = (
                 normalized.channel,
-                normalized.topic,
                 normalized.title,
                 normalized.keywords,
-                normalized.time_range,
                 normalized.response_language,
-                normalized.style,
-                normalized.length,
                 normalized.include_image,
                 normalized.footer_text,
                 normalized.footer_link,
@@ -136,9 +136,14 @@ class ExcelContractValidator:
         channel = self._required_text(upload_id, excel_row, "channel", raw_channel_value, errors)
         if channel is not None:
             channel = self._normalize_channel_value(raw_channel_value, channel)
-        topic = self._required_text(upload_id, excel_row, "topic", values.get("topic"), errors)
+        title = self._optional_text(values.get("title"))
+        legacy_topic = self._optional_text(values.get("topic"))
+        if title is None:
+            title = legacy_topic
+        if title is None:
+            self._required_text(upload_id, excel_row, "title", None, errors)
+
         keywords = self._required_text(upload_id, excel_row, "keywords", values.get("keywords"), errors)
-        time_range = self._required_text(upload_id, excel_row, "time_range", values.get("time_range"), errors)
         response_language = self._required_text(
             upload_id,
             excel_row,
@@ -148,32 +153,16 @@ class ExcelContractValidator:
         )
         mode = self._required_text(upload_id, excel_row, "mode", values.get("mode"), errors)
 
-        if time_range is not None:
-            self._validate_enum(
-                upload_id,
-                excel_row,
-                "time_range",
-                time_range,
-                tuple(item.value for item in TimeRange),
-                errors,
-            )
         if response_language is not None:
             self._validate_enum(upload_id, excel_row, "response_language", response_language, RESPONSE_LANGUAGE_VALUES, errors)
         if mode is not None:
             self._validate_enum(upload_id, excel_row, "mode", mode, tuple(item.value for item in PublishMode), errors)
         if channel is not None:
             self._validate_channel_target(upload_id, excel_row, channel, errors)
-
-        raw_style = self._optional_text(values.get("style"))
-        style = raw_style if raw_style else DEFAULT_STYLE
-        self._validate_enum(upload_id, excel_row, "style", style, STYLE_VALUES, errors)
-
-        raw_length = self._optional_text(values.get("length"))
-        length = raw_length if raw_length else DEFAULT_LENGTH
-        self._validate_enum(upload_id, excel_row, "length", length, LENGTH_VALUES, errors)
-
-        title = self._optional_text(values.get("title"))
-        resolved_title = title if title else (topic or "")
+        if keywords is not None:
+            self._validate_max_length(upload_id, excel_row, "keywords", keywords, MAX_KEYWORDS_CHARS, errors)
+        if title is not None:
+            self._validate_max_length(upload_id, excel_row, "title", title, MAX_TITLE_CHARS, errors)
 
         include_image_raw = values.get("include_image")
         include_image_excel = self._normalize_include_image_value(include_image_raw)
@@ -229,20 +218,34 @@ class ExcelContractValidator:
 
         footer_text = self._optional_text(values.get("footer_text"))
         footer_link = self._optional_text(values.get("footer_link"))
+        if footer_text is not None:
+            self._validate_max_length(
+                upload_id,
+                excel_row,
+                "footer_text",
+                footer_text,
+                MAX_FOOTER_TEXT_CHARS,
+                errors,
+            )
+        if footer_link is not None:
+            self._validate_max_length(
+                upload_id,
+                excel_row,
+                "footer_link",
+                footer_link,
+                MAX_FOOTER_LINK_CHARS,
+                errors,
+            )
 
-        if channel is None or topic is None or keywords is None or time_range is None or response_language is None or mode is None:
+        if channel is None or title is None or keywords is None or response_language is None or mode is None:
             return None
 
         return NormalizedTaskConfig(
             excel_row=excel_row,
             channel=channel,
-            topic=topic,
-            title=resolved_title,
+            title=title,
             keywords=keywords,
-            time_range=time_range,
             response_language=response_language,
-            style=style,
-            length=length,
             include_image=include_image_excel == IncludeImageExcelValue.TRUE.value,
             footer_text=footer_text,
             footer_link=footer_link,
@@ -323,6 +326,28 @@ class ExcelContractValidator:
                 error_code="ENUM_INVALID",
                 error_message="Invalid enum value.",
                 bad_value=value,
+            )
+        )
+
+    @staticmethod
+    def _validate_max_length(
+        upload_id: int,
+        excel_row: int,
+        column_name: str,
+        value: str,
+        max_chars: int,
+        errors: list[UploadValidationErrorItem],
+    ) -> None:
+        if len(value) <= max_chars:
+            return
+        errors.append(
+            UploadValidationErrorItem(
+                upload_id=upload_id,
+                excel_row=excel_row,
+                column_name=column_name,
+                error_code="FIELD_TOO_LONG",
+                error_message=f"Field exceeds maximum length ({max_chars} chars).",
+                bad_value=str(len(value)),
             )
         )
 

@@ -198,13 +198,9 @@ class UserActionRecord:
 class NormalizedTaskConfig:
     excel_row: int
     channel: str
-    topic: str
     title: str
     keywords: str
-    time_range: str
     response_language: str
-    style: str
-    length: str
     include_image: bool
     footer_text: str | None
     footer_link: str | None

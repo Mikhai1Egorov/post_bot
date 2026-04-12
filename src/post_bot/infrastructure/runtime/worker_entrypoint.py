@@ -103,7 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-name",
         default=None,
-        help="Model name passed to generation stage. Uses OPENAI_RESEARCH_MODEL when omitted.",
+        help="Model name passed to generation stage. Uses OPENAI_GENERATION_MODEL when omitted.",
     )
     parser.add_argument("--max-cycles", type=int, default=None, help="Optional bounded cycle count.")
     parser.add_argument("--max-failed-cycles", type=int, default=None, help="Stop early after this many failed cycles.")
@@ -129,7 +129,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--project-root",
         default=None,
-        help="Project root containing prompt resources. Auto-detected when omitted.",
+        help="Project root used for runtime data resolution. Auto-detected when omitted.",
     )
     parser.add_argument("--data-dir", default=None, help="Directory for runtime artifact files.")
     return parser
@@ -145,14 +145,13 @@ def main() -> int:
         logger = logging.getLogger("post_bot.runtime.worker")
 
         worker_id = (args.worker_id or os.getenv("WORKER_ID") or "worker-1").strip()
-        model_name = (args.model_name or config.openai_research_model).strip()
+        model_name = (args.model_name or config.openai_generation_model).strip()
 
         project_root = resolve_project_root(project_root_arg=args.project_root, anchor_file=__file__)
 
         ensure_runtime_dependencies(
             require_excel_parser=False,
             project_root=project_root,
-            require_prompt_resources=True,
             config=config,
             require_openai_client=True,
             require_db_schema_compatibility=True,
@@ -221,6 +220,17 @@ def main() -> int:
             error=internal,
         )
         return 1
+    except KeyboardInterrupt:
+        configure_logging("INFO")
+        logger = logging.getLogger("post_bot.runtime.worker")
+        log_event(
+            logger,
+            level=20,
+            module="infrastructure.runtime.worker_entrypoint",
+            action="worker_entrypoint_interrupted",
+            result="success",
+        )
+        return 130
 
 
 if __name__ == "__main__":

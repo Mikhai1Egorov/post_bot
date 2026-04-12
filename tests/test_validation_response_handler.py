@@ -68,5 +68,34 @@ class ValidationResponseHandlerTests(unittest.TestCase):
         self.assertIn("- mode: Invalid enum value.", text)
         self.assertIn("Fix the file and upload again.", text)
 
+    def test_field_too_long_is_localized_and_uses_actual_length(self) -> None:
+        errors = (
+            UploadValidationErrorItem(
+                upload_id=1,
+                excel_row=2,
+                column_name="topic",
+                error_code="FIELD_TOO_LONG",
+                error_message="Field exceeds maximum length (200 chars).",
+                bad_value="287",
+            ),
+        )
+        result = ValidateUploadResult(
+            upload_id=1,
+            status=UploadStatus.VALIDATION_FAILED,
+            total_rows_count=1,
+            valid_rows_count=0,
+            invalid_rows_count=1,
+            required_articles_count=0,
+            errors_count=1,
+            normalized_rows=tuple(),
+            validation_errors=errors,
+        )
+
+        text_ru = build_validation_response(InterfaceLanguage.RU, result)
+        self.assertIn('Длина поля "topic" превышает 200 символов (фактически: 287).', text_ru)
+
+        text_en = build_validation_response(InterfaceLanguage.EN, result)
+        self.assertIn('Field "topic" exceeds 200 characters (actual: 287).', text_en)
+
 if __name__ == "__main__":
     unittest.main()

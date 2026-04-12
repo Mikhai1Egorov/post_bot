@@ -206,6 +206,7 @@ class TelegramHttpGateway:
         request_timeout_seconds: float,
     ) -> bytes:
         is_get_updates = str(getattr(request, "full_url", "")).endswith("/getUpdates")
+        endpoint = self._resolve_endpoint_name(request)
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -225,6 +226,7 @@ class TelegramHttpGateway:
                             "status": status,
                             "reason": reason,
                             "body": body[:1000] if body else None,
+                            "endpoint": endpoint,
                             "attempt": attempt,
                             "max_attempts": max_attempts,
                         },
@@ -243,6 +245,7 @@ class TelegramHttpGateway:
                         "status": status,
                         "reason": reason,
                         "body": body[:1000] if body else None,
+                        "endpoint": endpoint,
                         "retry_after_seconds": retry_after_seconds,
                         "attempt": attempt,
                         "max_attempts": max_attempts,
@@ -250,14 +253,26 @@ class TelegramHttpGateway:
                     retryable=retryable,
                 ) from exc
             except URLError as exc:
-                reason = str(getattr(exc, "reason", str(exc)))
+                reason_obj = getattr(exc, "reason", None)
+                reason = str(reason_obj if reason_obj is not None else exc)
+                reason_type = type(reason_obj).__name__ if reason_obj is not None else None
                 if attempt < max_attempts:
                     time.sleep(self._retry_delay_seconds(attempt=attempt, retry_after_seconds=None))
                     continue
                 raise ExternalDependencyError(
                     code="TELEGRAM_NETWORK_ERROR",
                     message="Telegram network request failed.",
-                    details={"reason": reason, "attempt": attempt, "max_attempts": max_attempts},
+                    details={
+                        "status": None,
+                        "body": None,
+                        "reason": reason,
+                        "reason_type": reason_type,
+                        "exception_type": type(exc).__name__,
+                        "exception_repr": repr(exc),
+                        "endpoint": endpoint,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                    },
                     retryable=True,
                 ) from exc
             except TimeoutError as exc:
@@ -267,7 +282,17 @@ class TelegramHttpGateway:
                 raise ExternalDependencyError(
                     code="TELEGRAM_TIMEOUT",
                     message="Telegram request timed out.",
-                    details={"reason": str(exc), "attempt": attempt, "max_attempts": max_attempts},
+                    details={
+                        "status": None,
+                        "body": None,
+                        "reason": str(exc),
+                        "reason_type": type(exc).__name__,
+                        "exception_type": type(exc).__name__,
+                        "exception_repr": repr(exc),
+                        "endpoint": endpoint,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                    },
                     retryable=True,
                 ) from exc
 
@@ -276,11 +301,20 @@ class TelegramHttpGateway:
             message="Telegram network request failed.",
             details={
                 "reason": "request attempts exhausted",
+                "endpoint": endpoint,
                 "max_attempts": max_attempts,
                 "timeout_seconds": request_timeout_seconds,
             },
             retryable=True,
         )
+
+    @staticmethod
+    def _resolve_endpoint_name(request: Request) -> str | None:
+        url = str(getattr(request, "full_url", ""))
+        if not url:
+            return None
+        tail = url.rsplit("/", maxsplit=1)[-1].strip()
+        return tail or None
 
     @staticmethod
     def _read_http_error_body(error: HTTPError) -> str:

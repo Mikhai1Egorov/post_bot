@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import sys
@@ -22,22 +22,9 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
     FakePublisher,
     FakeResearchClient,
     InMemoryFileStorage,
-    InMemoryPromptLoader,
     InMemoryUnitOfWork,
 )
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
-
-
-def _resources() -> dict[str, str]:
-    return {
-        "SYSTEM_INSTRUCTIONS.txt": "SYSTEM",
-        "JOURNALIST_PROMPT_STYLE.txt": "STYLE JOURNALISTIC",
-        "SIMPLE_PROMPT_STYLE.txt": "STYLE SIMPLE",
-        "EXPERT_PROMPT_STYLE.txt": "STYLE EXPERT",
-        "MASTER_PROMPT_TEMPLATE.txt": "Topic={topic}; Title={title}; Keywords={keywords}",
-        "CONTENT_LENGTH_RULES.txt": "LENGTH RULES",
-        "LENGTH-BLOCKS.txt": "OPTIONAL RULES",
-    }
 
 
 class RuntimeWiringTests(unittest.TestCase):
@@ -90,7 +77,6 @@ class RuntimeWiringTests(unittest.TestCase):
         wiring = RuntimeWiring(
             uow=uow,
             artifact_storage=InMemoryFileStorage(),
-            prompt_loader=InMemoryPromptLoader(_resources()),
             research_client=FakeResearchClient(),
             llm_client=FakeLLMClient(response_text="# Title\nParagraph"),
             image_client=FakeImageClient(),
@@ -111,7 +97,6 @@ class RuntimeWiringTests(unittest.TestCase):
         wiring = RuntimeWiring(
             uow=uow,
             artifact_storage=InMemoryFileStorage(),
-            prompt_loader=InMemoryPromptLoader(_resources()),
             research_client=UnconfiguredResearchClient(),
             llm_client=UnconfiguredLLMClient(),
             image_client=UnconfiguredImageClient(),

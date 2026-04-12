@@ -1010,17 +1010,24 @@ class FakePublisher:
 
 
 class FakeResearchClient:
-    def __init__(self, *, sources: list[TaskResearchSource] | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        sources: list[TaskResearchSource] | None = None,
+        error: Exception | None = None,
+        model_name: str = "fake-research-model",
+    ) -> None:
         self._sources = sources or []
         self._error = error
+        self.model_name = model_name
 
     def collect(
         self,
         *,
-        topic: str,
+        title: str,
         keywords: str,
-        time_range: str,
     ) -> list[TaskResearchSource]:
+        _ = (title, keywords)
         if self._error is not None:
             raise self._error
         result: list[TaskResearchSource] = []
