@@ -23,9 +23,21 @@ class RenderedContent:
 class PostProcessingModule:
     """Converts generated raw text into canonical HTML artifact."""
 
+    _SERVICE_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+        re.compile(r"^\[\s*image\s+placeholder\b.*\]\s*$", re.IGNORECASE),
+        re.compile(r"^image\s+placeholder\b.*$", re.IGNORECASE),
+        re.compile(r"^for\s+more\s+insights\b.*$", re.IGNORECASE),
+        re.compile(r"^visit\s+the\s+full\s+report\b.*$", re.IGNORECASE),
+        re.compile(
+            r"^these\s+trends\s+highlight\s+the\s+growing\s+impact\s+of\s+artificial\s+intelligence\b.*$",
+            re.IGNORECASE,
+        ),
+    )
+
     def render(self, *, task: Task, raw_output_text: str, image_url: str | None = None) -> RenderedContent:
         normalized_output = self._normalize_raw_output(raw_output_text)
         lines = [line.strip() for line in normalized_output.splitlines() if line.strip()]
+        lines = self._drop_service_lines(lines)
         if not lines:
             raise ValidationError(
                 code="RAW_OUTPUT_EMPTY",
@@ -40,7 +52,7 @@ class PostProcessingModule:
 
         document = "\n".join(["<article>", f"  <h1>{escape(title)}</h1>", html_body, "</article>"])
 
-        preview = self._build_preview(normalized_output)
+        preview = self._build_preview("\n".join(lines))
         slug = self._slugify(title)
 
         return RenderedContent(
@@ -142,6 +154,15 @@ class PostProcessingModule:
             blocks.append(self._render_schedule(task.scheduled_publish_at))
 
         return "\n".join(blocks)
+
+    @classmethod
+    def _drop_service_lines(cls, lines: list[str]) -> list[str]:
+        filtered: list[str] = []
+        for line in lines:
+            if any(pattern.match(line) for pattern in cls._SERVICE_LINE_PATTERNS):
+                continue
+            filtered.append(line)
+        return filtered
 
     @staticmethod
     def _render_schedule(value: datetime) -> str:

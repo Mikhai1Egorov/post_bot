@@ -73,6 +73,10 @@ class Task:
     task_status: TaskStatus = TaskStatus.CREATED
     retry_count: int = 0
     last_error_message: str | None = None
+    next_attempt_at: datetime | None = None
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
+    lease_until: datetime | None = None
     completed_at: datetime | None = None
 @dataclass(slots=True, frozen=True)
 class TaskStatusHistoryItem:
@@ -97,6 +101,7 @@ class LedgerEntry:
     payment_id: int | None = None
     upload_id: int | None = None
     task_id: int | None = None
+    note_text: str | None = None
     created_at: datetime | None = None
 
 @dataclass(slots=True, frozen=True)

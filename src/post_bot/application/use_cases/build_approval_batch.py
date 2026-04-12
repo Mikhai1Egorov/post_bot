@@ -46,6 +46,7 @@ class BuildApprovalBatchUseCase:
 
     def execute(self, command: BuildApprovalBatchCommand) -> BuildApprovalBatchResult:
         timer = TimedLog()
+        created_batch_id: int | None = None
 
         try:
             with self._uow:
@@ -56,9 +57,28 @@ class BuildApprovalBatchUseCase:
                         message="Upload does not exist.",
                         details={"upload_id": command.upload_id},
                     )
+                tasks = self._uow.tasks.list_by_upload(upload.id)
+                ready_tasks = [task for task in tasks if task.task_status == TaskStatus.READY_FOR_APPROVAL]
+                if not ready_tasks:
+                    raise BusinessRuleError(
+                        code="APPROVAL_TASKS_NOT_FOUND",
+                        message="No tasks in READY_FOR_APPROVAL status for this upload.",
+                        details={"upload_id": upload.id},
+                    )
 
+                task_ids = [task.id for task in ready_tasks]
+                ready_task_id_set = set(task_ids)
                 existing_batch = self._uow.approval_batches.find_by_upload(upload.id)
-                if existing_batch is not None and existing_batch.zip_artifact_id is not None:
+                existing_task_ids: tuple[int, ...] = tuple()
+                if existing_batch is not None:
+                    existing_task_ids = tuple(self._uow.approval_batch_items.list_task_ids(existing_batch.id))
+
+                if (
+                    existing_batch is not None
+                    and existing_batch.zip_artifact_id is not None
+                    and existing_batch.batch_status in {ApprovalBatchStatus.READY, ApprovalBatchStatus.USER_NOTIFIED}
+                    and set(existing_task_ids) == ready_task_id_set
+                ):
                     zip_artifact = self._uow.artifacts.get_by_id(existing_batch.zip_artifact_id)
                     if zip_artifact is None:
                         raise InternalError(
@@ -72,21 +92,19 @@ class BuildApprovalBatchUseCase:
                         batch_id=existing_batch.id,
                         zip_artifact_id=zip_artifact.id,
                         zip_storage_path=zip_artifact.storage_path,
-                        task_ids=tuple(self._uow.approval_batch_items.list_task_ids(existing_batch.id)),
+                        task_ids=existing_task_ids,
                         error_code=None,
                     )
 
-                tasks = self._uow.tasks.list_by_upload(upload.id)
-                ready_tasks = [task for task in tasks if task.task_status == TaskStatus.READY_FOR_APPROVAL]
-                if not ready_tasks:
-                    raise BusinessRuleError(
-                        code="APPROVAL_TASKS_NOT_FOUND",
-                        message="No tasks in READY_FOR_APPROVAL status for this upload.",
-                        details={"upload_id": upload.id},
-                    )
+                # New READY_FOR_APPROVAL set appeared after previous notification batch.
+                # Expire active batch so old callback buttons become deterministic no-ops.
+                if (
+                    existing_batch is not None
+                    and existing_batch.batch_status in {ApprovalBatchStatus.READY, ApprovalBatchStatus.USER_NOTIFIED}
+                ):
+                    self._uow.approval_batches.set_status(existing_batch.id, ApprovalBatchStatus.EXPIRED)
 
-                task_ids = [task.id for task in ready_tasks]
-                artifact_refs: list[tuple[int, str]] = []
+                artifact_refs: list[tuple[int, str, str]] = []
                 for task in ready_tasks:
                     artifacts = self._uow.artifacts.list_by_task(task.id)
                     html_artifact = next(
@@ -102,16 +120,28 @@ class BuildApprovalBatchUseCase:
                             code="TASK_HTML_ARTIFACT_MISSING",
                             message="Final HTML artifact is required for approval batch.",
                             details={"task_id": task.id, "upload_id": upload.id},
-                        )
-                    artifact_refs.append((task.id, html_artifact.storage_path))
+                    )
+                    archive_file_name = self._normalize_archive_file_name(
+                        file_name=html_artifact.file_name,
+                        task_id=task.id,
+                    )
+                    artifact_refs.append((task.id, html_artifact.storage_path, archive_file_name))
 
-                batch = existing_batch or self._uow.approval_batches.create_ready(upload_id=upload.id, user_id=upload.user_id)
+                batch = self._uow.approval_batches.create_ready(upload_id=upload.id, user_id=upload.user_id)
+                created_batch_id = batch.id
                 self._uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=task_ids)
                 self._uow.commit()
 
             zip_files: list[tuple[str, bytes]] = []
-            for task_id, storage_path in artifact_refs:
-                zip_files.append((f"task_{task_id}.html", self._file_storage.read_bytes(storage_path)))
+            used_archive_names: set[str] = set()
+            for task_id, storage_path, archive_file_name in artifact_refs:
+                unique_name = self._ensure_unique_archive_name(
+                    archive_name=archive_file_name,
+                    task_id=task_id,
+                    used=used_archive_names,
+                )
+                used_archive_names.add(unique_name)
+                zip_files.append((unique_name, self._file_storage.read_bytes(storage_path)))
             zip_payload = self._zip_builder.build_zip(zip_files)
 
             zip_file_name = f"upload_{command.upload_id}_approval_batch.zip"
@@ -123,12 +153,28 @@ class BuildApprovalBatchUseCase:
             )
 
             with self._uow:
-                batch_for_update = self._uow.approval_batches.find_by_upload(command.upload_id)
+                if created_batch_id is None:
+                    raise InternalError(
+                        code="APPROVAL_BATCH_ID_MISSING_AFTER_CREATE",
+                        message="Approval batch id is missing after batch creation.",
+                        details={"upload_id": command.upload_id},
+                    )
+                batch_for_update = self._uow.approval_batches.get_by_id_for_update(created_batch_id)
                 if batch_for_update is None:
                     raise InternalError(
                         code="APPROVAL_BATCH_NOT_FOUND_AFTER_CREATE",
                         message="Approval batch disappeared after creation.",
-                        details={"upload_id": command.upload_id},
+                        details={"upload_id": command.upload_id, "batch_id": created_batch_id},
+                    )
+                if batch_for_update.batch_status != ApprovalBatchStatus.READY:
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_FINALIZE_STALE",
+                        message="Approval batch became stale before ZIP finalize.",
+                        details={
+                            "upload_id": command.upload_id,
+                            "batch_id": created_batch_id,
+                            "batch_status": batch_for_update.batch_status.value,
+                        },
                     )
 
                 zip_artifact = self._uow.artifacts.add_artifact(
@@ -192,3 +238,32 @@ class BuildApprovalBatchUseCase:
                 task_ids=tuple(),
                 error_code=error.code,
             )
+
+    @staticmethod
+    def _normalize_archive_file_name(*, file_name: str, task_id: int) -> str:
+        normalized = (file_name or "").strip().replace("\\", "/")
+        normalized = normalized.rsplit("/", 1)[-1] if normalized else ""
+        if not normalized:
+            return f"task_{task_id}.html"
+        if not normalized.lower().endswith(".html"):
+            return f"{normalized}.html"
+        return normalized
+
+    @staticmethod
+    def _ensure_unique_archive_name(*, archive_name: str, task_id: int, used: set[str]) -> str:
+        if archive_name not in used:
+            return archive_name
+
+        if archive_name.lower().endswith(".html"):
+            stem = archive_name[:-5]
+            suffix = ".html"
+        else:
+            stem = archive_name
+            suffix = ""
+
+        counter = 2
+        while True:
+            candidate = f"{stem} [{task_id}] ({counter}){suffix}"
+            if candidate not in used:
+                return candidate
+            counter += 1

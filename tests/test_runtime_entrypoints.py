@@ -84,6 +84,57 @@ class _FakeTelegramRuntime:
 
 
 class RuntimeEntrypointsTests(unittest.TestCase):
+    def test_release_maintenance_lock_consumes_result_before_closing(self) -> None:
+        from post_bot.infrastructure.runtime import maintenance_entrypoint
+
+        class _FakeCursor:
+            def __init__(self) -> None:
+                self.query: str | None = None
+                self.params: tuple[object, ...] | None = None
+                self.fetched = False
+                self.closed = False
+
+            def execute(self, query: str, params: tuple[object, ...]) -> None:
+                self.query = query
+                self.params = params
+
+            def fetchone(self) -> tuple[int]:
+                self.fetched = True
+                return (1,)
+
+            def nextset(self) -> bool:
+                return False
+
+            def close(self) -> None:
+                if not self.fetched:
+                    raise RuntimeError("Unread result found")
+                self.closed = True
+
+        class _FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = _FakeCursor()
+                self.closed = False
+
+            def cursor(self) -> _FakeCursor:
+                return self.cursor_instance
+
+            def close(self) -> None:
+                self.closed = True
+
+        connection = _FakeConnection()
+        handle = maintenance_entrypoint._MaintenanceLockHandle(
+            connection=connection,
+            lock_name="post_bot:maintenance:global",
+        )
+
+        maintenance_entrypoint._release_maintenance_lock(handle)
+
+        self.assertEqual(connection.cursor_instance.query, "SELECT RELEASE_LOCK(%s)")
+        self.assertEqual(connection.cursor_instance.params, ("post_bot:maintenance:global",))
+        self.assertTrue(connection.cursor_instance.fetched)
+        self.assertTrue(connection.cursor_instance.closed)
+        self.assertTrue(connection.closed)
+
     def test_worker_entrypoint_parses_args_and_runs_runtime(self) -> None:
         from post_bot.infrastructure.runtime import worker_entrypoint
 
@@ -251,11 +302,14 @@ class RuntimeEntrypointsTests(unittest.TestCase):
         from post_bot.infrastructure.runtime import maintenance_entrypoint
 
         fake_runtime = _FakeMaintenanceRuntime()
+        fake_lock = object()
 
         with (
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.AppConfig.from_env", return_value=_config()),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.configure_logging"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.ensure_runtime_dependencies"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._try_acquire_maintenance_lock", return_value=fake_lock),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._release_maintenance_lock") as release_lock_mock,
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_default_runtime_wiring", return_value=object()),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.run_startup_recovery_pass") as startup_recovery_mock,
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_maintenance_runtime", return_value=fake_runtime),
@@ -264,6 +318,8 @@ class RuntimeEntrypointsTests(unittest.TestCase):
                 "argv",
                 [
                     "post-bot-maintenance",
+                    "--profile",
+                    "manual",
                     "--iterations",
                     "3",
                     "--interval-seconds",
@@ -288,8 +344,11 @@ class RuntimeEntrypointsTests(unittest.TestCase):
                     "77",
                     "--expire-reason",
                     "MANUAL_EXPIRY",
+                    "--startup-recovery",
                     "--cleanup",
                     "--cleanup-dry-run",
+                    "--cleanup-batch-limit",
+                    "88",
                 ],
             ),
         ):
@@ -312,20 +371,24 @@ class RuntimeEntrypointsTests(unittest.TestCase):
         self.assertEqual(fake_runtime.last_command.expire_reason_code, "MANUAL_EXPIRY")
         self.assertTrue(fake_runtime.last_command.cleanup_non_final_artifacts)
         self.assertTrue(fake_runtime.last_command.cleanup_dry_run)
+        self.assertEqual(fake_runtime.last_command.cleanup_batch_limit, 88)
         startup_recovery_mock.assert_called_once()
+        release_lock_mock.assert_called_once_with(fake_lock)
 
 
     def test_maintenance_entrypoint_can_disable_startup_recovery(self) -> None:
         from post_bot.infrastructure.runtime import maintenance_entrypoint
 
         fake_runtime = _FakeMaintenanceRuntime()
+        fake_lock = object()
 
         with (
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.AppConfig.from_env", return_value=_config()),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.configure_logging"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.ensure_runtime_dependencies"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._try_acquire_maintenance_lock", return_value=fake_lock),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._release_maintenance_lock"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_default_runtime_wiring", return_value=object()),
-            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.run_startup_recovery_pass") as startup_recovery_mock,
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.run_startup_recovery_pass") as startup_recovery_mock,
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_maintenance_runtime", return_value=fake_runtime),
             patch.object(
@@ -333,6 +396,8 @@ class RuntimeEntrypointsTests(unittest.TestCase):
                 "argv",
                 [
                     "post-bot-maintenance",
+                    "--profile",
+                    "recovery",
                     "--no-startup-recovery",
                     "--iterations",
                     "1",
@@ -357,11 +422,14 @@ class RuntimeEntrypointsTests(unittest.TestCase):
                 terminated_early=True,
             )
         )
+        fake_lock = object()
 
         with (
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.AppConfig.from_env", return_value=_config()),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.configure_logging"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.ensure_runtime_dependencies"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._try_acquire_maintenance_lock", return_value=fake_lock),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._release_maintenance_lock"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_default_runtime_wiring", return_value=object()),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.run_startup_recovery_pass"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_maintenance_runtime", return_value=fake_runtime),
@@ -383,13 +451,16 @@ class RuntimeEntrypointsTests(unittest.TestCase):
         from post_bot.infrastructure.runtime import maintenance_entrypoint
 
         fake_runtime = _FakeMaintenanceRuntime()
+        fake_lock = object()
 
         with (
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.AppConfig.from_env", return_value=_config()),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.configure_logging"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.ensure_runtime_dependencies"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._try_acquire_maintenance_lock", return_value=fake_lock),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._release_maintenance_lock"),
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_default_runtime_wiring", return_value=object()),
-            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.run_startup_recovery_pass"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.run_startup_recovery_pass") as startup_recovery_mock,
             patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_maintenance_runtime", return_value=fake_runtime),
             patch.object(
                 sys,
@@ -397,7 +468,7 @@ class RuntimeEntrypointsTests(unittest.TestCase):
                 [
                     "post-bot-maintenance",
                     "--profile",
-                    "safe_periodic",
+                    "scheduled",
                 ],
             ),
         ):
@@ -405,7 +476,7 @@ class RuntimeEntrypointsTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIsNotNone(fake_runtime.last_command)
-        self.assertEqual(fake_runtime.last_command.launch_profile, "safe_periodic")
+        self.assertEqual(fake_runtime.last_command.launch_profile, "scheduled")
         self.assertEqual(fake_runtime.last_command.iterations, 1)
         self.assertEqual(fake_runtime.last_command.interval_seconds, 0.0)
         self.assertIsNone(fake_runtime.last_command.max_failed_iterations)
@@ -418,6 +489,41 @@ class RuntimeEntrypointsTests(unittest.TestCase):
         self.assertEqual(fake_runtime.last_command.expire_reason_code, "APPROVAL_BATCH_EXPIRED")
         self.assertTrue(fake_runtime.last_command.cleanup_non_final_artifacts)
         self.assertFalse(fake_runtime.last_command.cleanup_dry_run)
+        self.assertEqual(fake_runtime.last_command.cleanup_batch_limit, 200)
+        startup_recovery_mock.assert_not_called()
+
+    def test_maintenance_entrypoint_skips_when_lock_is_busy(self) -> None:
+        from post_bot.infrastructure.runtime import maintenance_entrypoint
+
+        fake_runtime = _FakeMaintenanceRuntime()
+
+        with (
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.AppConfig.from_env", return_value=_config()),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.configure_logging"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.ensure_runtime_dependencies"),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._try_acquire_maintenance_lock", return_value=None),
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint._release_maintenance_lock") as release_lock_mock,
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_default_runtime_wiring") as wiring_mock,
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.run_startup_recovery_pass") as startup_recovery_mock,
+            patch("post_bot.infrastructure.runtime.maintenance_entrypoint.build_maintenance_runtime", return_value=fake_runtime) as runtime_builder_mock,
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "post-bot-maintenance",
+                    "--profile",
+                    "scheduled",
+                ],
+            ),
+        ):
+            exit_code = maintenance_entrypoint.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNone(fake_runtime.last_command)
+        wiring_mock.assert_not_called()
+        runtime_builder_mock.assert_not_called()
+        startup_recovery_mock.assert_not_called()
+        release_lock_mock.assert_not_called()
 
     def test_bot_entrypoint_parses_args_and_runs_runtime(self) -> None:
         from post_bot.infrastructure.runtime import bot_entrypoint
@@ -457,6 +563,38 @@ class RuntimeEntrypointsTests(unittest.TestCase):
         self.assertEqual(fake_runtime.last_command.offset, 101)
         self.assertEqual(fake_runtime.last_command.idle_sleep_seconds, 0.1)
         self.assertEqual(fake_runtime.last_command.poll_timeout_seconds, 30)
+
+    def test_bot_entrypoint_uses_checkpoint_offset_when_cli_offset_missing(self) -> None:
+        from post_bot.infrastructure.runtime import bot_entrypoint
+
+        fake_runtime = _FakeTelegramRuntime()
+
+        with (
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.AppConfig.from_env", return_value=_config()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.configure_logging"),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.ensure_runtime_dependencies"),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring", return_value=type("W", (), {"uow": object()})()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramHttpGateway", return_value=object()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.GetUserContextUseCase", return_value=object()),
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.FileTelegramUpdateCheckpoint") as checkpoint_cls,
+            patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramPollingRuntime", return_value=fake_runtime),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "post-bot-telegram",
+                    "--max-cycles",
+                    "1",
+                ],
+            ),
+        ):
+            checkpoint_instance = checkpoint_cls.return_value
+            checkpoint_instance.load.return_value = 777
+            exit_code = bot_entrypoint.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNotNone(fake_runtime.last_command)
+        self.assertEqual(fake_runtime.last_command.offset, 777)
 
     def test_bot_entrypoint_returns_nonzero_when_runtime_failed(self) -> None:
         from post_bot.infrastructure.runtime import bot_entrypoint

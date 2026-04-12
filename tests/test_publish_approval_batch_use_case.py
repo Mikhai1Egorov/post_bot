@@ -23,6 +23,7 @@ from post_bot.shared.enums import (  # noqa: E402
     UserActionType,
 )
 
+
 class PublishApprovalBatchUseCaseTests(unittest.TestCase):
 
     @staticmethod
@@ -191,6 +192,147 @@ class PublishApprovalBatchUseCaseTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "APPROVAL_BATCH_EXPIRED")
+
+    def test_publish_approval_batch_rejected_for_non_owner(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+
+        uow.tasks.create_many([self._task(1, upload.id)])
+        self._seed_render(uow, 1)
+
+        batch = uow.approval_batches.create_ready(upload_id=upload.id, user_id=20)
+        uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.USER_NOTIFIED)
+        uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=[1])
+
+        publish_task = PublishTaskUseCase(
+            uow=uow,
+            publisher=FakePublisher(),
+            logger=logging.getLogger("test.publish_task"),
+        )
+        use_case = PublishApprovalBatchUseCase(
+            uow=uow,
+            publish_task_use_case=publish_task,
+            logger=logging.getLogger("test.publish_approval_batch"),
+        )
+
+        result = use_case.execute(PublishApprovalBatchCommand(batch_id=batch.id, user_id=999, changed_by="user"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "APPROVAL_BATCH_FORBIDDEN")
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.READY_FOR_APPROVAL)
+        self.assertEqual(len(uow.user_actions.records), 0)
+
+    def test_publish_approval_batch_returns_concrete_error_code_for_partial_failure(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+
+        tasks = [self._task(1, upload.id), self._task(2, upload.id)]
+        uow.tasks.create_many(tasks)
+        self._seed_render(uow, 1)
+        # Task 2 intentionally has no successful render -> RENDER_NOT_READY on publish.
+
+        batch = uow.approval_batches.create_ready(upload_id=upload.id, user_id=20)
+        uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.USER_NOTIFIED)
+        uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=[1, 2])
+
+        publish_task = PublishTaskUseCase(
+            uow=uow,
+            publisher=FakePublisher(),
+            logger=logging.getLogger("test.publish_task"),
+        )
+        use_case = PublishApprovalBatchUseCase(
+            uow=uow,
+            publish_task_use_case=publish_task,
+            logger=logging.getLogger("test.publish_approval_batch"),
+        )
+
+        result = use_case.execute(PublishApprovalBatchCommand(batch_id=batch.id, user_id=20, changed_by="user"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.published_task_ids, (1,))
+        self.assertEqual(result.failed_task_ids, (2,))
+        self.assertEqual(result.error_code, "RENDER_NOT_READY")
+        self.assertEqual(uow.approval_batches.records[batch.id].batch_status, ApprovalBatchStatus.USER_NOTIFIED)
+
+    def test_publish_approval_batch_expires_stale_snapshot_when_new_ready_task_appears(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+
+        tasks = [self._task(1, upload.id), self._task(2, upload.id), self._task(3, upload.id)]
+        uow.tasks.create_many(tasks)
+        self._seed_render(uow, 1)
+        self._seed_render(uow, 2)
+        self._seed_render(uow, 3)
+
+        batch = uow.approval_batches.create_ready(upload_id=upload.id, user_id=20)
+        uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.USER_NOTIFIED)
+        uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=[1, 2])
+
+        publish_task = PublishTaskUseCase(
+            uow=uow,
+            publisher=FakePublisher(),
+            logger=logging.getLogger("test.publish_task"),
+        )
+        use_case = PublishApprovalBatchUseCase(
+            uow=uow,
+            publish_task_use_case=publish_task,
+            logger=logging.getLogger("test.publish_approval_batch"),
+        )
+
+        result = use_case.execute(PublishApprovalBatchCommand(batch_id=batch.id, user_id=20, changed_by="user"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "APPROVAL_BATCH_EXPIRED")
+        self.assertEqual(uow.approval_batches.records[batch.id].batch_status, ApprovalBatchStatus.EXPIRED)
+
+    def test_publish_approval_batch_is_idempotent_for_already_done_items(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+
+        tasks = [self._task(1, upload.id), self._task(2, upload.id)]
+        uow.tasks.create_many(tasks)
+        self._seed_render(uow, 1)
+        self._seed_render(uow, 2)
+
+        uow.tasks.set_task_status(1, TaskStatus.DONE, changed_by="test", reason="already_published")
+        published = uow.publications.create_pending(
+            task_id=1,
+            target_channel="@news",
+            publish_mode="approval",
+            scheduled_for=None,
+        )
+        uow.publications.mark_published(
+            published.id,
+            external_message_id="msg-1",
+            publisher_payload_json={"provider": "fake"},
+            published_at=None,
+        )
+
+        batch = uow.approval_batches.create_ready(upload_id=upload.id, user_id=20)
+        uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.USER_NOTIFIED)
+        uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=[1, 2])
+
+        publish_task = PublishTaskUseCase(
+            uow=uow,
+            publisher=FakePublisher(),
+            logger=logging.getLogger("test.publish_task"),
+        )
+        use_case = PublishApprovalBatchUseCase(
+            uow=uow,
+            publish_task_use_case=publish_task,
+            logger=logging.getLogger("test.publish_approval_batch"),
+        )
+
+        result = use_case.execute(PublishApprovalBatchCommand(batch_id=batch.id, user_id=20, changed_by="user"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(set(result.published_task_ids), {1, 2})
+        self.assertEqual(result.failed_task_ids, tuple())
+
 
 if __name__ == "__main__":
     unittest.main()

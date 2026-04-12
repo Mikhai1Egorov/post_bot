@@ -29,6 +29,7 @@ class MaintenanceRuntimeCommand:
     expire_reason_code: str = "APPROVAL_BATCH_EXPIRED"
     cleanup_non_final_artifacts: bool = True
     cleanup_dry_run: bool = False
+    cleanup_batch_limit: int = 200
     launch_profile: str = "manual"
     max_failed_iterations: int | None = None
     max_stage_retry_attempts: int = 2
@@ -77,6 +78,12 @@ class MaintenanceRuntime:
                 message="max_stage_retry_attempts must be >= 1.",
                 details={"max_stage_retry_attempts": command.max_stage_retry_attempts},
             )
+        if command.cleanup_batch_limit < 1:
+            raise BusinessRuleError(
+                code="MAINTENANCE_CLEANUP_BATCH_LIMIT_INVALID",
+                message="cleanup_batch_limit must be >= 1.",
+                details={"cleanup_batch_limit": command.cleanup_batch_limit},
+            )
 
         timer = TimedLog()
 
@@ -104,6 +111,7 @@ class MaintenanceRuntime:
                         expire_reason_code=command.expire_reason_code,
                         cleanup_non_final_artifacts=command.cleanup_non_final_artifacts,
                         cleanup_dry_run=command.cleanup_dry_run,
+                        cleanup_batch_limit=command.cleanup_batch_limit,
                         max_stage_retry_attempts=command.max_stage_retry_attempts,
                     )
                 )

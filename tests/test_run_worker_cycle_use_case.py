@@ -27,7 +27,7 @@ from post_bot.pipeline.modules.post_processing import PostProcessingModule  # no
 from post_bot.pipeline.modules.preparation import PreparationModule  # noqa: E402
 from post_bot.pipeline.modules.prompt_resolver import PromptResolverModule  # noqa: E402
 from post_bot.pipeline.modules.research import ResearchModule  # noqa: E402
-from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
+from post_bot.shared.enums import ArtifactType, TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
 from post_bot.shared.errors import BusinessRuleError  # noqa: E402
 
 
@@ -105,6 +105,85 @@ class RunWorkerCycleUseCaseTests(unittest.TestCase):
             retry_count=0,
         )
         uow.tasks.create_many([task])
+        return upload.id
+
+    def _seed_publish_retry_task(self, uow: InMemoryUnitOfWork) -> int:
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.uploads.set_billing_status(upload.id, UploadBillingStatus.CONSUMED)
+        uow.uploads.set_reserved_articles_count(upload.id, 0)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(
+                user_id=upload.user_id,
+                available_articles_count=0,
+                reserved_articles_count=0,
+                consumed_articles_total=1,
+            )
+        )
+
+        task = Task(
+            id=1,
+            upload_id=upload.id,
+            user_id=upload.user_id,
+            target_channel="@news",
+            topic_text="AI adoption",
+            custom_title="AI adoption in 2026",
+            keywords_text="ai, automation",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.PUBLISHING,
+            retry_count=1,
+            last_error_message="TELEGRAM_HTTP_ERROR: temporary transport issue",
+        )
+        uow.tasks.create_many([task])
+
+        generation = uow.generations.create_started(
+            task_id=1,
+            model_name="gpt-test",
+            prompt_template_key="JOURNALIST_PROMPT_STYLE",
+            final_prompt_text="prompt",
+            research_context_text="ctx",
+        )
+        uow.generations.mark_succeeded(generation.id, raw_output_text="# Title\nParagraph")
+        render = uow.renders.create_started(task_id=1)
+        uow.renders.mark_succeeded(
+            render.id,
+            final_title_text="AI adoption in 2026",
+            body_html="<article><h1>AI adoption in 2026</h1><p>Body</p></article>",
+            preview_text="Preview",
+            slug_value="ai-adoption-in-2026",
+            html_storage_path="memory://artifacts/1/task_1.html",
+        )
+        uow.artifacts.add_artifact(
+            task_id=1,
+            upload_id=upload.id,
+            artifact_type=ArtifactType.HTML,
+            storage_path="memory://artifacts/1/task_1.html",
+            file_name="task_1.html",
+            mime_type="text/html",
+            size_bytes=123,
+            is_final=True,
+        )
+        uow.artifacts.add_artifact(
+            task_id=1,
+            upload_id=upload.id,
+            artifact_type=ArtifactType.PREVIEW,
+            storage_path="memory://artifacts/1/task_1.txt",
+            file_name="task_1.txt",
+            mime_type="text/plain",
+            size_bytes=42,
+            is_final=True,
+        )
         return upload.id
 
     def _build_cycle(self, *, uow: InMemoryUnitOfWork, llm: FakeLLMClient, publisher: FakePublisher) -> RunWorkerCycleUseCase:
@@ -190,6 +269,35 @@ class RunWorkerCycleUseCaseTests(unittest.TestCase):
         self.assertFalse(result.had_task)
         self.assertTrue(result.success)
         self.assertIsNone(result.task_id)
+
+    def test_cycle_publish_retry_claim_executes_publish_only_without_generation_rerun(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload_id = self._seed_publish_retry_task(uow)
+        generation_count_before = len(uow.generations.records)
+        render_before = uow.renders.get_by_task_id(1)
+        artifact_count_before = len(uow.artifacts.records)
+        self.assertIsNotNone(render_before)
+        publisher = FakePublisher(external_message_id="msg-retry-ok")
+
+        cycle = self._build_cycle(
+            uow=uow,
+            llm=FakeLLMClient(error=RuntimeError("generation_must_not_run")),
+            publisher=publisher,
+        )
+
+        result = cycle.execute(RunWorkerCycleCommand(worker_id="worker-1", model_name="gpt-test"))
+
+        self.assertTrue(result.had_task)
+        self.assertTrue(result.success)
+        self.assertEqual(result.final_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.DONE)
+        self.assertEqual(len(publisher.calls), 1)
+        self.assertEqual(len(uow.generations.records), generation_count_before)
+        render_after = uow.renders.get_by_task_id(1)
+        self.assertIsNotNone(render_after)
+        self.assertEqual(render_after.id, render_before.id)
+        self.assertEqual(len(uow.artifacts.records), artifact_count_before)
+        self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.COMPLETED)
 
     def test_cycle_handles_unexpected_claim_exception(self) -> None:
         cycle = RunWorkerCycleUseCase(

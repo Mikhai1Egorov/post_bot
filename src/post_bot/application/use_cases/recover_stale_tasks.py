@@ -80,6 +80,7 @@ class RecoverStaleTasksUseCase:
                     task.id,
                     retry_count=task.retry_count + 1,
                     last_error_message=command.reason_code,
+                    next_attempt_at=None,
                 )
                 transition_task_status(
                     uow=self._uow,

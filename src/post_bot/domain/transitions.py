@@ -23,7 +23,7 @@ TASK_ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.CANCELLED,
         TaskStatus.FAILED,
     },
-    TaskStatus.PUBLISHING: {TaskStatus.DONE, TaskStatus.QUEUED, TaskStatus.CANCELLED, TaskStatus.FAILED},
+    TaskStatus.PUBLISHING: {TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.FAILED},
     TaskStatus.DONE: set(),
     TaskStatus.FAILED: set(),
     TaskStatus.CANCELLED: set(),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from post_bot.domain.models import (
@@ -37,10 +37,12 @@ from post_bot.shared.enums import (
     UploadStatus,
     UserActionType,
 )
+from post_bot.shared.errors import BusinessRuleError
 
 
-def _utc_now_naive() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+def _db_now_naive() -> datetime:
+    """Returns naive server-local timestamp to match MySQL CURRENT_TIMESTAMP semantics."""
+    return datetime.now().replace(tzinfo=None)
 
 
 def _json_dumps(value: dict[str, Any] | None) -> str | None:
@@ -331,6 +333,14 @@ class MySQLUploadRepository(_BaseMySQLRepository):
             reserved_articles_count=int(row[10] or 0),
         )
 class MySQLTaskRepository(_BaseMySQLRepository):
+    _LEASE_ACTIVE_STATUSES: tuple[TaskStatus, ...] = (
+        TaskStatus.PREPARING,
+        TaskStatus.RESEARCHING,
+        TaskStatus.GENERATING,
+        TaskStatus.RENDERING,
+        TaskStatus.PUBLISHING,
+    )
+
     def create_many(self, tasks: list[Task]) -> list[Task]:
         created: list[Task] = []
         for task in tasks:
@@ -356,8 +366,12 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                     billing_state,
                     task_status,
                     retry_count,
-                    last_error_message
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    last_error_message,
+                    next_attempt_at,
+                    claimed_by,
+                    claimed_at,
+                    lease_until
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     task.upload_id,
@@ -380,6 +394,10 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                     task.task_status.value,
                     task.retry_count,
                     task.last_error_message,
+                    task.next_attempt_at,
+                    task.claimed_by,
+                    task.claimed_at,
+                    task.lease_until,
                 ),
             )
             created_row = self._fetchone(self._select_task_sql(where_for_update=False), (task_id,))
@@ -400,14 +418,23 @@ class MySQLTaskRepository(_BaseMySQLRepository):
         )
         return [self._map_task(row) for row in rows]
 
-    def list_by_statuses(self, statuses: tuple[TaskStatus, ...]) -> list[Task]:
+    def list_by_statuses(self, statuses: tuple[TaskStatus, ...], *, limit: int | None = None) -> list[Task]:
         if not statuses:
             return []
+        if limit is not None and limit < 1:
+            return []
+
         placeholders = ", ".join(["%s"] * len(statuses))
         values = tuple(status.value for status in statuses)
+        sql = self._select_tasks_base_sql() + f" WHERE t.task_status IN ({placeholders}) ORDER BY t.id"
+        params: tuple[Any, ...] = values
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = values + (limit,)
+
         rows = self._fetchall(
-            self._select_tasks_base_sql() + f" WHERE t.task_status IN ({placeholders}) ORDER BY t.id",
-            values,
+            sql,
+            params,
         )
         return [self._map_task(row) for row in rows]
 
@@ -428,10 +455,13 @@ class MySQLTaskRepository(_BaseMySQLRepository):
             FROM tasks t
             WHERE t.task_status IN ({placeholders})
               AND t.updated_at <= %s
+              AND t.claimed_by IS NOT NULL
+              AND t.lease_until IS NOT NULL
+              AND t.lease_until <= %s
             ORDER BY t.updated_at, t.id
             LIMIT %s
             """,
-            tuple(status.value for status in statuses) + (threshold_before, limit),
+            tuple(status.value for status in statuses) + (threshold_before, threshold_before, limit),
         )
         return tuple(int(row[0]) for row in rows)
 
@@ -440,16 +470,60 @@ class MySQLTaskRepository(_BaseMySQLRepository):
             """
             SELECT id
             FROM tasks
-            WHERE task_status IN (%s, %s)
+            WHERE (
+                    task_status = %s
+                    OR (
+                        task_status = %s
+                        AND retry_count = 0
+                    )
+                    OR (
+                        task_status = %s
+                        AND retry_count > 0
+                        AND last_error_message IS NOT NULL
+                        AND (
+                            next_attempt_at IS NULL
+                            OR next_attempt_at <= CURRENT_TIMESTAMP()
+                        )
+                    )
+                    OR (
+                        task_status = %s
+                        AND retry_count > 0
+                        AND last_error_message IS NOT NULL
+                        AND (
+                            next_attempt_at IS NULL
+                            OR next_attempt_at <= CURRENT_TIMESTAMP()
+                        )
+                    )
+                  )
+              AND (
+                    lease_until IS NULL
+                    OR lease_until <= CURRENT_TIMESTAMP()
+                  )
               AND (
                     scheduled_publish_at IS NULL
-                    OR scheduled_publish_at <= NOW()
+                    OR scheduled_publish_at <= CURRENT_TIMESTAMP()
                   )
-            ORDER BY CASE task_status WHEN %s THEN 0 ELSE 1 END, id
+            ORDER BY
+                CASE task_status
+                    WHEN %s THEN 0
+                    WHEN %s THEN 1
+                    WHEN %s THEN 2
+                    ELSE 3
+                END,
+                COALESCE(next_attempt_at, created_at),
+                id
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             """,
-            (TaskStatus.QUEUED.value, TaskStatus.CREATED.value, TaskStatus.QUEUED.value),
+            (
+                TaskStatus.CREATED.value,
+                TaskStatus.QUEUED.value,
+                TaskStatus.QUEUED.value,
+                TaskStatus.PUBLISHING.value,
+                TaskStatus.CREATED.value,
+                TaskStatus.QUEUED.value,
+                TaskStatus.PUBLISHING.value,
+            ),
         )
         if row is None:
             return None
@@ -461,13 +535,20 @@ class MySQLTaskRepository(_BaseMySQLRepository):
 
     def set_task_status(self, task_id: int, status: TaskStatus, *, changed_by: str, reason: str | None) -> None:
         _ = (changed_by, reason)
+        if status in self._LEASE_ACTIVE_STATUSES:
+            self._execute("UPDATE tasks SET task_status = %s WHERE id = %s", (status.value, task_id))
+            return
         if is_task_final(status):
             self._execute(
-                "UPDATE tasks SET task_status = %s, completed_at = COALESCE(completed_at, UTC_TIMESTAMP()) WHERE id = %s",
+                "UPDATE tasks SET task_status = %s, claimed_by = NULL, claimed_at = NULL, lease_until = NULL, "
+                "completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP()) WHERE id = %s",
                 (status.value, task_id),
             )
             return
-        self._execute("UPDATE tasks SET task_status = %s WHERE id = %s", (status.value, task_id))
+        self._execute(
+            "UPDATE tasks SET task_status = %s, claimed_by = NULL, claimed_at = NULL, lease_until = NULL WHERE id = %s",
+            (status.value, task_id),
+        )
 
     def set_task_billing_state(self, task_id: int, billing_state: TaskBillingState) -> None:
         self._execute(
@@ -475,11 +556,46 @@ class MySQLTaskRepository(_BaseMySQLRepository):
             (billing_state.value, task_id),
         )
 
-    def set_retry_state(self, task_id: int, *, retry_count: int, last_error_message: str | None) -> None:
+    def set_retry_state(
+        self,
+        task_id: int,
+        *,
+        retry_count: int,
+        last_error_message: str | None,
+        next_attempt_at: datetime | None,
+    ) -> None:
         self._execute(
-            "UPDATE tasks SET retry_count = %s, last_error_message = %s WHERE id = %s",
-            (retry_count, last_error_message, task_id),
+            "UPDATE tasks SET retry_count = %s, last_error_message = %s, next_attempt_at = %s WHERE id = %s",
+            (retry_count, last_error_message, next_attempt_at, task_id),
         )
+
+    def set_task_lease(
+        self,
+        task_id: int,
+        *,
+        claimed_by: str | None,
+        claimed_at: datetime | None,
+        lease_until: datetime | None,
+    ) -> None:
+        self._execute(
+            "UPDATE tasks SET claimed_by = %s, claimed_at = %s, lease_until = %s WHERE id = %s",
+            (claimed_by, claimed_at, lease_until, task_id),
+        )
+
+    def heartbeat_task_lease(self, task_id: int, *, worker_id: str, lease_until: datetime) -> bool:
+        active_statuses = tuple(status.value for status in self._LEASE_ACTIVE_STATUSES)
+        placeholders = ", ".join(["%s"] * len(active_statuses))
+        updated = self._execute(
+            f"""
+            UPDATE tasks
+            SET lease_until = %s
+            WHERE id = %s
+              AND claimed_by = %s
+              AND task_status IN ({placeholders})
+            """,
+            (lease_until, task_id, worker_id, *active_statuses),
+        )
+        return updated > 0
 
     @staticmethod
     def _select_tasks_base_sql() -> str:
@@ -507,6 +623,10 @@ class MySQLTaskRepository(_BaseMySQLRepository):
                 t.task_status,
                 t.retry_count,
                 t.last_error_message,
+                t.next_attempt_at,
+                t.claimed_by,
+                t.claimed_at,
+                t.lease_until,
                 t.completed_at
             FROM tasks t
         """
@@ -541,7 +661,11 @@ class MySQLTaskRepository(_BaseMySQLRepository):
             task_status=TaskStatus(str(row[19])),
             retry_count=int(row[20] or 0),
             last_error_message=str(row[21]) if row[21] is not None else None,
-            completed_at=row[22],
+            next_attempt_at=row[22],
+            claimed_by=str(row[23]) if row[23] is not None else None,
+            claimed_at=row[24],
+            lease_until=row[25],
+            completed_at=row[26],
         )
 
 
@@ -599,8 +723,10 @@ class MySQLLedgerRepository(_BaseMySQLRepository):
                 task_id,
                 entry_type,
                 articles_delta,
+                balance_after,
+                note_text,
                 created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 entry.user_id,
@@ -609,7 +735,9 @@ class MySQLLedgerRepository(_BaseMySQLRepository):
                 entry.task_id,
                 entry.entry_type.value,
                 entry.articles_delta,
-                entry.created_at or _utc_now_naive(),
+                None,
+                entry.note_text,
+                entry.created_at or _db_now_naive(),
             ),
         )
 
@@ -716,8 +844,9 @@ class MySQLGenerationRepository(_BaseMySQLRepository):
                 final_prompt_text,
                 research_context_text,
                 generation_status,
+                started_at,
                 retryable
-            ) VALUES (%s, %s, %s, %s, %s, %s, 0)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
             """,
             (
                 task_id,
@@ -726,6 +855,7 @@ class MySQLGenerationRepository(_BaseMySQLRepository):
                 final_prompt_text,
                 research_context_text,
                 GenerationStatus.STARTED.value,
+                _db_now_naive(),
             ),
         )
         row = self._fetchone(self._select_generation_sql(), (generation_id,))
@@ -747,7 +877,7 @@ class MySQLGenerationRepository(_BaseMySQLRepository):
             (
                 GenerationStatus.SUCCEEDED.value,
                 raw_output_text,
-                _utc_now_naive(),
+                _db_now_naive(),
                 generation_id,
             ),
         )
@@ -776,7 +906,7 @@ class MySQLGenerationRepository(_BaseMySQLRepository):
                 error_code,
                 error_message,
                 1 if retryable else 0,
-                _utc_now_naive(),
+                _db_now_naive(),
                 generation_id,
             ),
         )
@@ -1016,8 +1146,17 @@ class MySQLArtifactRepository(_BaseMySQLRepository):
         )
         return [self._map_artifact(row) for row in rows]
 
-    def list_non_final(self) -> list[TaskArtifactRecord]:
-        rows = self._fetchall(self._select_artifact_base_sql() + " WHERE a.is_final = 0 ORDER BY a.id")
+    def list_non_final(self, *, limit: int | None = None) -> list[TaskArtifactRecord]:
+        if limit is not None and limit < 1:
+            return []
+
+        sql = self._select_artifact_base_sql() + " WHERE a.is_final = 0 ORDER BY a.id"
+        params: tuple[Any, ...] | None = None
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (limit,)
+
+        rows = self._fetchall(sql, params)
         return [self._map_artifact(row) for row in rows]
 
     def delete_by_id(self, artifact_id: int) -> None:
@@ -1114,7 +1253,7 @@ class MySQLApprovalBatchRepository(_BaseMySQLRepository):
         return tuple(int(row[0]) for row in rows)
 
     def set_status(self, batch_id: int, status: ApprovalBatchStatus) -> None:
-        now = _utc_now_naive()
+        now = _db_now_naive()
 
         if status == ApprovalBatchStatus.USER_NOTIFIED:
             self._execute(
@@ -1234,6 +1373,25 @@ class MySQLPublicationRepository(_BaseMySQLRepository):
         publish_mode: str,
         scheduled_for: datetime | None,
     ) -> PublicationRecord:
+        existing_row = self._fetchone(
+            """
+            SELECT id
+            FROM publications
+            WHERE task_id = %s
+              AND publication_status = %s
+            ORDER BY id DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (task_id, PublicationStatus.PENDING.value),
+        )
+        if existing_row is not None:
+            raise BusinessRuleError(
+                code="PUBLICATION_ALREADY_IN_PROGRESS",
+                message="Publication is already in progress for this task.",
+                details={"task_id": task_id, "publication_id": int(existing_row[0])},
+            )
+
         publication_id = self._execute_insert(
             """
             INSERT INTO publications (
@@ -1283,10 +1441,28 @@ class MySQLPublicationRepository(_BaseMySQLRepository):
             ),
         )
 
-    def mark_failed(self, publication_id: int, *, error_message: str) -> None:
+    def mark_failed(
+        self,
+        publication_id: int,
+        *,
+        error_message: str,
+        publisher_payload_json: dict[str, Any] | None = None,
+    ) -> None:
         self._execute(
-            "UPDATE publications SET publication_status = %s, error_message = %s WHERE id = %s",
-            (PublicationStatus.FAILED.value, error_message, publication_id),
+            """
+            UPDATE publications
+            SET
+                publication_status = %s,
+                error_message = %s,
+                publisher_payload_json = COALESCE(%s, publisher_payload_json)
+            WHERE id = %s
+            """,
+            (
+                PublicationStatus.FAILED.value,
+                error_message,
+                _json_dumps(publisher_payload_json),
+                publication_id,
+            ),
         )
 
     def mark_skipped(self, publication_id: int, *, error_message: str | None = None) -> None:

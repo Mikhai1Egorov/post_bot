@@ -9,9 +9,11 @@ if __package__ in {None, ""}:  # pragma: no cover
     sys.path.insert(0, str(_BootstrapPath(__file__).resolve().parents[3]))
 
 import argparse
+from dataclasses import dataclass
+from importlib import import_module
 import logging
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from post_bot.application.use_cases.recover_stale_tasks import RecoverStaleTasksCommand, RecoverStaleTasksUseCase
 from post_bot.application.use_cases.select_recoverable_stale_tasks import (
@@ -28,11 +30,12 @@ from post_bot.infrastructure.runtime.startup_checks import ensure_runtime_depend
 from post_bot.infrastructure.runtime.wiring import RuntimeWiring, build_default_runtime_wiring, build_maintenance_runtime
 from post_bot.shared.config import AppConfig
 from post_bot.shared.enums import TaskStatus
-from post_bot.shared.errors import AppError, InternalError
+from post_bot.shared.errors import AppError, ExternalDependencyError, InternalError
 from post_bot.shared.logging import TimedLog, configure_logging, log_event
 
 
 _T = TypeVar("_T")
+_MAINTENANCE_LOCK_NAME = "post_bot:maintenance:global"
 _STARTUP_RECOVERY_STATUSES: tuple[TaskStatus, ...] = (
     TaskStatus.PREPARING,
     TaskStatus.RESEARCHING,
@@ -40,6 +43,59 @@ _STARTUP_RECOVERY_STATUSES: tuple[TaskStatus, ...] = (
     TaskStatus.RENDERING,
     TaskStatus.PUBLISHING,
 )
+
+
+@dataclass(slots=True, frozen=True)
+class _MaintenanceLockHandle:
+    connection: Any
+    lock_name: str
+
+
+def _try_acquire_maintenance_lock(*, config: AppConfig, lock_name: str = _MAINTENANCE_LOCK_NAME) -> _MaintenanceLockHandle | None:
+    try:
+        mysql_connector = import_module("mysql.connector")
+    except ModuleNotFoundError as exc:
+        raise ExternalDependencyError(
+            code="MYSQL_DRIVER_MISSING",
+            message="mysql.connector is required for MySQL connections.",
+            retryable=False,
+        ) from exc
+
+    connection = mysql_connector.connect(
+        host=config.db_host,
+        port=config.db_port,
+        user=config.db_user,
+        password=config.db_password,
+        database=config.db_name,
+    )
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SELECT GET_LOCK(%s, 0)", (lock_name,))
+        row = cursor.fetchone()
+    finally:
+        cursor.close()
+
+    acquired = bool(row and int(row[0] or 0) == 1)
+    if not acquired:
+        connection.close()
+        return None
+    return _MaintenanceLockHandle(connection=connection, lock_name=lock_name)
+
+
+def _release_maintenance_lock(handle: _MaintenanceLockHandle) -> None:
+    cursor = handle.connection.cursor()
+    try:
+        cursor.execute("SELECT RELEASE_LOCK(%s)", (handle.lock_name,))
+        cursor.fetchone()
+        nextset = getattr(cursor, "nextset", None)
+        if callable(nextset):
+            while nextset():
+                pass
+    finally:
+        try:
+            cursor.close()
+        finally:
+            handle.connection.close()
 
 
 def _parse_id_list(raw: str | None) -> tuple[int, ...]:
@@ -117,7 +173,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile",
         choices=maintenance_profile_choices(),
-        default="manual",
+        default="scheduled",
         help="Deterministic maintenance launch profile.",
     )
     parser.add_argument("--iterations", type=int, default=None, help="How many maintenance cycles to run.")
@@ -137,19 +193,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--startup-recovery",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Run one stale-task recovery pass before maintenance cycles start.",
     )
     parser.add_argument(
         "--startup-recovery-older-than-minutes",
         type=int,
-        default=1,
+        default=None,
         help="Recover in-progress tasks older than this many minutes during startup pass.",
     )
     parser.add_argument(
         "--startup-recovery-limit",
         type=int,
-        default=200,
+        default=None,
         help="Max stale tasks to recover during startup pass.",
     )
     parser.add_argument("--stale-task-ids", default=None, help="Comma-separated explicit stale task ids.")
@@ -197,6 +253,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Scan cleanup targets without deleting.",
     )
     parser.add_argument(
+        "--cleanup-batch-limit",
+        type=int,
+        default=None,
+        help="Max non-final artifacts to cleanup in one run.",
+    )
+    parser.add_argument(
         "--project-root",
         default=None,
         help="Project root containing prompt resources. Auto-detected when omitted.",
@@ -219,46 +281,86 @@ def main() -> int:
         project_root = resolve_project_root(project_root_arg=args.project_root, anchor_file=__file__)
         ensure_runtime_dependencies(require_excel_parser=False, config=config, require_db_schema_compatibility=True)
 
-        wiring = build_default_runtime_wiring(
-            config=config,
-            project_root=project_root,
-            data_dir=Path(args.data_dir).resolve() if args.data_dir else None,
-        )
-        if args.startup_recovery:
-            run_startup_recovery_pass(
-                wiring=wiring,
-                logger=logger,
-                runner_id=f"maintenance:{profile.name}",
-                older_than_minutes=args.startup_recovery_older_than_minutes,
-                limit=args.startup_recovery_limit,
+        lock_handle = _try_acquire_maintenance_lock(config=config)
+        if lock_handle is None:
+            log_event(
+                logger,
+                level=20,
+                module="infrastructure.runtime.maintenance_entrypoint",
+                action="maintenance_skipped_lock_busy",
+                result="success",
+                extra={"lock_name": _MAINTENANCE_LOCK_NAME, "launch_profile": profile.name},
             )
-        runtime = build_maintenance_runtime(wiring=wiring, logger=logger)
+            return 0
 
-        result = runtime.run(
-            MaintenanceRuntimeCommand(
-                iterations=_resolve_optional(args.iterations, profile.iterations),
-                interval_seconds=_resolve_optional(args.interval_seconds, profile.interval_seconds),
-                max_failed_iterations=args.max_failed_iterations,
-                max_stage_retry_attempts=args.max_stage_retry_attempts,
-                stale_task_ids=_parse_id_list(args.stale_task_ids),
-                auto_recover_older_than_minutes=_resolve_optional(
-                    args.auto_recover_older_than_minutes,
-                    profile.auto_recover_older_than_minutes,
-                ),
-                auto_recover_limit=_resolve_optional(args.auto_recover_limit, profile.auto_recover_limit),
-                recover_reason_code=_resolve_optional(args.recover_reason, profile.recover_reason_code),
-                expirable_batch_ids=_parse_id_list(args.expire_batch_ids),
-                auto_expire_older_than_minutes=_resolve_optional(
-                    args.auto_expire_older_than_minutes,
-                    profile.auto_expire_older_than_minutes,
-                ),
-                auto_expire_limit=_resolve_optional(args.auto_expire_limit, profile.auto_expire_limit),
-                expire_reason_code=_resolve_optional(args.expire_reason, profile.expire_reason_code),
-                cleanup_non_final_artifacts=_resolve_optional(args.cleanup, profile.cleanup_non_final_artifacts),
-                cleanup_dry_run=_resolve_optional(args.cleanup_dry_run, profile.cleanup_dry_run),
-                launch_profile=profile.name,
+        try:
+            wiring = build_default_runtime_wiring(
+                config=config,
+                project_root=project_root,
+                data_dir=Path(args.data_dir).resolve() if args.data_dir else None,
             )
-        )
+            startup_recovery_enabled = _resolve_optional(args.startup_recovery, profile.startup_recovery_enabled)
+            startup_recovery_older_than_minutes = _resolve_optional(
+                args.startup_recovery_older_than_minutes,
+                profile.startup_recovery_older_than_minutes,
+            )
+            startup_recovery_limit = _resolve_optional(
+                args.startup_recovery_limit,
+                profile.startup_recovery_limit,
+            )
+            if startup_recovery_enabled:
+                run_startup_recovery_pass(
+                    wiring=wiring,
+                    logger=logger,
+                    runner_id=f"maintenance:{profile.name}",
+                    older_than_minutes=startup_recovery_older_than_minutes,
+                    limit=startup_recovery_limit,
+                )
+            runtime = build_maintenance_runtime(wiring=wiring, logger=logger)
+
+            result = runtime.run(
+                MaintenanceRuntimeCommand(
+                    iterations=_resolve_optional(args.iterations, profile.iterations),
+                    interval_seconds=_resolve_optional(args.interval_seconds, profile.interval_seconds),
+                    max_failed_iterations=args.max_failed_iterations,
+                    max_stage_retry_attempts=args.max_stage_retry_attempts,
+                    stale_task_ids=_parse_id_list(args.stale_task_ids),
+                    auto_recover_older_than_minutes=_resolve_optional(
+                        args.auto_recover_older_than_minutes,
+                        profile.auto_recover_older_than_minutes,
+                    ),
+                    auto_recover_limit=_resolve_optional(args.auto_recover_limit, profile.auto_recover_limit),
+                    recover_reason_code=_resolve_optional(args.recover_reason, profile.recover_reason_code),
+                    expirable_batch_ids=_parse_id_list(args.expire_batch_ids),
+                    auto_expire_older_than_minutes=_resolve_optional(
+                        args.auto_expire_older_than_minutes,
+                        profile.auto_expire_older_than_minutes,
+                    ),
+                    auto_expire_limit=_resolve_optional(args.auto_expire_limit, profile.auto_expire_limit),
+                    expire_reason_code=_resolve_optional(args.expire_reason, profile.expire_reason_code),
+                    cleanup_non_final_artifacts=_resolve_optional(args.cleanup, profile.cleanup_non_final_artifacts),
+                    cleanup_dry_run=_resolve_optional(args.cleanup_dry_run, profile.cleanup_dry_run),
+                    cleanup_batch_limit=_resolve_optional(args.cleanup_batch_limit, profile.cleanup_batch_limit),
+                    launch_profile=profile.name,
+                )
+            )
+        finally:
+            try:
+                _release_maintenance_lock(lock_handle)
+            except Exception as exc:  # noqa: BLE001
+                log_event(
+                    logger,
+                    level=30,
+                    module="infrastructure.runtime.maintenance_entrypoint",
+                    action="maintenance_lock_release_failed",
+                    result="failure",
+                    error=InternalError(
+                        code="MAINTENANCE_LOCK_RELEASE_FAILED",
+                        message="Failed to release maintenance lock.",
+                        details={"lock_name": lock_handle.lock_name, "error": str(exc)},
+                    ),
+                )
+
         logger.info(
             "maintenance_runtime_result profile=%s iterations=%s recovered=%s expired=%s cleanup_deleted=%s failed_iterations=%s max_stage_retry_attempts=%s terminated_early=%s",
             profile.name,

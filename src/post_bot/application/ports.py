@@ -80,6 +80,7 @@ class PublisherPort(Protocol):
         channel: str,
         html: str,
         scheduled_for: datetime | None,
+        resume_payload_json: dict[str, Any] | None = None,
     ) -> tuple[str | None, dict[str, Any] | None]: ...
 
 

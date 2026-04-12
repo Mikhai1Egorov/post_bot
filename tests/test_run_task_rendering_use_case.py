@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import replace
 
@@ -240,6 +240,13 @@ class RunTaskRenderingUseCaseTests(unittest.TestCase):
         artifacts = uow.artifacts.list_by_task(1)
         self.assertEqual(len(artifacts), 2)
         self.assertEqual({a.artifact_type.value for a in artifacts}, {"HTML", "PREVIEW"})
+        html_artifact = next(a for a in artifacts if a.artifact_type.value == "HTML")
+        self.assertEqual(html_artifact.file_name, "Title [1].html")
+        html_document = storage.read_bytes(html_artifact.storage_path).decode("utf-8")
+        self.assertIn("<!DOCTYPE html>", html_document)
+        self.assertIn('<meta charset="UTF-8" />', html_document)
+        self.assertIn("<article>", html_document)
+
 
     def test_rendering_fails_when_generation_missing(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -292,6 +299,3 @@ class RunTaskRenderingUseCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-

@@ -237,6 +237,12 @@ class MaintenanceRuntimeTests(unittest.TestCase):
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
         uow.tasks.create_many([self._task(1, upload.id, TaskStatus.PREPARING)])
+        uow.tasks.set_task_lease(
+            1,
+            claimed_by="worker-1",
+            claimed_at=datetime(2020, 1, 1, 0, 0, 0),
+            lease_until=datetime(2020, 1, 1, 0, 0, 0),
+        )
         uow.tasks.updated_at_by_task_id[1] = datetime(2020, 1, 1, 0, 0, 0)
 
         runtime = self._build_runtime(uow=uow, storage=storage)
@@ -280,6 +286,12 @@ class MaintenanceRuntimeTests(unittest.TestCase):
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
         uow.tasks.create_many([self._task(1, upload.id, TaskStatus.PREPARING)])
+        uow.tasks.set_task_lease(
+            1,
+            claimed_by="worker-1",
+            claimed_at=datetime(2020, 1, 1, 0, 0, 0),
+            lease_until=datetime(2020, 1, 1, 0, 0, 0),
+        )
         uow.tasks.updated_at_by_task_id[1] = datetime(2020, 1, 1, 0, 0, 0)
 
         runtime = self._build_runtime(uow=uow, storage=storage)

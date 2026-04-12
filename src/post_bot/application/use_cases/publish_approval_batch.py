@@ -9,9 +9,10 @@ from typing import Any
 from post_bot.application.upload_status import resolve_upload_status_from_tasks
 from post_bot.application.use_cases.publish_task import PublishTaskCommand, PublishTaskUseCase
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
-from post_bot.shared.enums import ApprovalBatchStatus, UserActionType
+from post_bot.shared.enums import ApprovalBatchStatus, TaskStatus, UserActionType
 from post_bot.shared.errors import AppError, BusinessRuleError, InternalError
 from post_bot.shared.logging import TimedLog, log_event
+
 
 @dataclass(slots=True, frozen=True)
 class PublishApprovalBatchCommand:
@@ -20,6 +21,7 @@ class PublishApprovalBatchCommand:
     changed_by: str = "user"
     action_payload_json: dict[str, Any] | None = None
 
+
 @dataclass(slots=True, frozen=True)
 class PublishApprovalBatchResult:
     batch_id: int
@@ -27,6 +29,7 @@ class PublishApprovalBatchResult:
     published_task_ids: tuple[int, ...]
     failed_task_ids: tuple[int, ...]
     error_code: str | None
+
 
 class PublishApprovalBatchUseCase:
     """Publishes all tasks from approval batch using task-level publish flow."""
@@ -54,6 +57,16 @@ class PublishApprovalBatchUseCase:
                         message="Approval batch does not exist.",
                         details={"batch_id": command.batch_id},
                     )
+                if batch.user_id != command.user_id:
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_FORBIDDEN",
+                        message="Approval batch belongs to another user.",
+                        details={
+                            "batch_id": command.batch_id,
+                            "user_id": command.user_id,
+                            "owner_user_id": batch.user_id,
+                        },
+                    )
                 if batch.batch_status == ApprovalBatchStatus.PUBLISHED:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_ALREADY_PUBLISHED",
@@ -80,6 +93,17 @@ class PublishApprovalBatchUseCase:
                         message="Approval batch has no linked tasks.",
                         details={"batch_id": command.batch_id},
                     )
+                if self._has_new_ready_tasks_outside_batch(batch.upload_id, batch_task_ids=set(task_ids)):
+                    self._uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.EXPIRED)
+                    self._uow.commit()
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_EXPIRED",
+                        message="Approval batch is stale and has been expired.",
+                        details={
+                            "batch_id": command.batch_id,
+                            "upload_id": batch.upload_id,
+                        },
+                    )
 
                 self._uow.user_actions.append_action(
                     user_id=command.user_id,
@@ -92,8 +116,25 @@ class PublishApprovalBatchUseCase:
 
             published_task_ids: list[int] = []
             failed_task_ids: list[int] = []
+            first_failed_error_code: str | None = None
 
             for task_id in task_ids:
+                with self._uow:
+                    task = self._uow.tasks.get_by_id_for_update(task_id)
+                    self._uow.commit()
+                if task is None:
+                    failed_task_ids.append(task_id)
+                    if first_failed_error_code is None:
+                        first_failed_error_code = "APPROVAL_TASK_NOT_FOUND"
+                    continue
+                if task.task_status == TaskStatus.DONE:
+                    published_task_ids.append(task_id)
+                    continue
+                if task.task_status in {TaskStatus.CANCELLED, TaskStatus.FAILED}:
+                    failed_task_ids.append(task_id)
+                    if first_failed_error_code is None:
+                        first_failed_error_code = "APPROVAL_TASK_TERMINAL_STATUS"
+                    continue
                 task_result = self._publish_task_use_case.execute(
                     PublishTaskCommand(task_id=task_id, changed_by=command.changed_by)
                 )
@@ -101,6 +142,8 @@ class PublishApprovalBatchUseCase:
                     published_task_ids.append(task_id)
                 else:
                     failed_task_ids.append(task_id)
+                    if first_failed_error_code is None and task_result.error_code is not None:
+                        first_failed_error_code = task_result.error_code
 
             with self._uow:
                 batch_for_update = self._uow.approval_batches.get_by_id_for_update(command.batch_id)
@@ -137,14 +180,20 @@ class PublishApprovalBatchUseCase:
                     "user_id": command.user_id,
                     "published_count": len(published_task_ids),
                     "failed_count": len(failed_task_ids),
+                    "first_failed_error_code": first_failed_error_code,
                 },
+            )
+            batch_error_code = (
+                None
+                if not failed_task_ids
+                else (first_failed_error_code or "APPROVAL_BATCH_PARTIAL_FAILURE")
             )
             return PublishApprovalBatchResult(
                 batch_id=command.batch_id,
                 success=not failed_task_ids,
                 published_task_ids=tuple(published_task_ids),
                 failed_task_ids=tuple(failed_task_ids),
-                error_code=None,
+                error_code=batch_error_code,
             )
 
         except AppError as error:
@@ -165,3 +214,10 @@ class PublishApprovalBatchUseCase:
                 failed_task_ids=tuple(),
                 error_code=error.code,
             )
+
+    def _has_new_ready_tasks_outside_batch(self, upload_id: int, *, batch_task_ids: set[int]) -> bool:
+        tasks = self._uow.tasks.list_by_upload(upload_id)
+        current_ready_task_ids = {
+            task.id for task in tasks if task.task_status == TaskStatus.READY_FOR_APPROVAL
+        }
+        return len(current_ready_task_ids - batch_task_ids) > 0

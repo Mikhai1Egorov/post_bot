@@ -105,6 +105,41 @@ class CleanupNonFinalArtifactsUseCaseTests(unittest.TestCase):
         self.assertIsNotNone(uow.artifacts.get_by_id(artifact.id))
         self.assertEqual(storage.read_bytes(path), b"temp")
 
+    def test_cleanup_respects_batch_limit(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+
+        paths = []
+        for idx in range(3):
+            path = storage.save_task_artifact(
+                task_id=1,
+                artifact_type=ArtifactType.PREVIEW,
+                file_name=f"tmp_{idx}.txt",
+                content=b"tmp",
+            )
+            paths.append(path)
+            uow.artifacts.add_artifact(
+                task_id=1,
+                upload_id=10,
+                artifact_type=ArtifactType.PREVIEW,
+                storage_path=path,
+                file_name=f"tmp_{idx}.txt",
+                mime_type="text/plain",
+                size_bytes=3,
+                is_final=False,
+            )
+
+        use_case = CleanupNonFinalArtifactsUseCase(
+            uow=uow,
+            artifact_storage=storage,
+            logger=logging.getLogger("test.cleanup"),
+        )
+
+        result = use_case.execute(CleanupNonFinalArtifactsCommand(dry_run=False, batch_limit=2))
+        self.assertEqual(result.scanned_count, 2)
+        self.assertEqual(result.deleted_count, 2)
+        self.assertEqual(len(uow.artifacts.records), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

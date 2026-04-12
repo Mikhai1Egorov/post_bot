@@ -1,8 +1,9 @@
-﻿"""Run post-processing rendering and persist artifacts by publish mode."""
+"""Run post-processing rendering and persist artifacts by publish mode."""
 
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 from logging import Logger
 
@@ -91,14 +92,23 @@ class RunTaskRenderingUseCase:
             rendered = self._maybe_render_with_generated_image(task=task, generation_raw_output=generation.raw_output_text, rendered=rendered)
 
             preview_bytes = rendered.preview_text.encode("utf-8")
-            html_bytes = rendered.body_html.encode("utf-8")
+            approval_document_html = self._build_approval_document_html(
+                title=rendered.final_title_text,
+                article_html=rendered.body_html,
+            )
+            html_bytes = approval_document_html.encode("utf-8")
 
             html_path: str | None = None
+            html_file_name: str | None = None
             if task.publish_mode == "approval":
+                html_file_name = self._build_approval_html_file_name(
+                    title=rendered.final_title_text,
+                    task_id=task.id,
+                )
                 html_path = self._artifact_storage.save_task_artifact(
                     task_id=task.id,
                     artifact_type=ArtifactType.HTML,
-                    file_name=f"task_{task.id}.html",
+                    file_name=html_file_name,
                     content=html_bytes,
                 )
             preview_path = self._artifact_storage.save_task_artifact(
@@ -117,13 +127,13 @@ class RunTaskRenderingUseCase:
                     slug_value=rendered.slug_value,
                     html_storage_path=html_path,
                 )
-                if html_path is not None:
+                if html_path is not None and html_file_name is not None:
                     self._uow.artifacts.add_artifact(
                         task_id=task.id,
                         upload_id=task.upload_id,
                         artifact_type=ArtifactType.HTML,
                         storage_path=html_path,
-                        file_name=f"task_{task.id}.html",
+                        file_name=html_file_name,
                         mime_type="text/html",
                         size_bytes=len(html_bytes),
                         is_final=True,
@@ -306,6 +316,35 @@ class RunTaskRenderingUseCase:
         encoded = base64.b64encode(content).decode("ascii")
         return f"data:{mime_type};base64,{encoded}"
 
+    @staticmethod
+    def _build_approval_html_file_name(*, title: str, task_id: int) -> str:
+        normalized = " ".join((title or "").split())
+        normalized = re.sub(r'[\/:*?"<>|\x00-\x1F]+', " ", normalized).strip(" .")
+        if not normalized:
+            normalized = f"task_{task_id}"
+        if len(normalized) > 96:
+            normalized = normalized[:96].rstrip(" .")
+        return f"{normalized} [{task_id}].html"
+
+    @staticmethod
+    def _build_approval_document_html(*, title: str, article_html: str) -> str:
+        escaped_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return "\n".join(
+            [
+                "<!DOCTYPE html>",
+                "<html lang=\"en\">",
+                "<head>",
+                "  <meta charset=\"UTF-8\" />",
+                "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+                f"  <title>{escaped_title}</title>",
+                "</head>",
+                "<body>",
+                article_html,
+                "</body>",
+                "</html>",
+            ]
+        )
+
     def _handle_failure(
         self,
         *,
@@ -330,6 +369,7 @@ class RunTaskRenderingUseCase:
                 command.task_id,
                 retry_count=task.retry_count,
                 last_error_message=f"{error.code}: {error.message}",
+                next_attempt_at=None,
             )
             transition_task_status(
                 uow=self._uow,
@@ -359,4 +399,3 @@ class RunTaskRenderingUseCase:
             render_id=render_id,
             error_code=error.code,
         )
-

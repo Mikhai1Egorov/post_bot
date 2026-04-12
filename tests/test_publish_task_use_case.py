@@ -15,7 +15,7 @@ from post_bot.infrastructure.testing.in_memory import FakeImageClient, FakePubli
 from post_bot.pipeline.modules.post_processing import PostProcessingModule  # noqa: E402
 from post_bot.shared.constants import TASK_MAX_RETRY_ATTEMPTS  # noqa: E402
 from post_bot.shared.enums import PublicationStatus, TaskBillingState, TaskStatus, UploadStatus  # noqa: E402
-from post_bot.shared.errors import ValidationError  # noqa: E402
+from post_bot.shared.errors import ExternalDependencyError, ValidationError  # noqa: E402
 
 
 
@@ -233,7 +233,31 @@ class PublishTaskUseCaseTests(unittest.TestCase):
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.COMPLETED)
         self.assertEqual(len(publisher.calls), 0)
 
-    def test_publish_retryable_failure_requeues_task(self) -> None:
+    def test_publish_is_guarded_when_publication_already_pending(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload_id = self._create_processing_upload(uow)
+        uow.tasks.create_many([self._task(upload_id=upload_id, status=TaskStatus.PUBLISHING)])
+        self._seed_successful_render(uow, task_id=1)
+
+        pending = uow.publications.create_pending(
+            task_id=1,
+            target_channel="@news",
+            publish_mode="instant",
+            scheduled_for=None,
+        )
+
+        publisher = FakePublisher()
+        use_case = PublishTaskUseCase(uow=uow, publisher=publisher, logger=logging.getLogger("test.publish"))
+
+        result = use_case.execute(PublishTaskCommand(task_id=1, changed_by="worker-1"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "PUBLICATION_ALREADY_IN_PROGRESS")
+        self.assertEqual(result.publication_id, pending.id)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.PUBLISHING)
+        self.assertEqual(len(publisher.calls), 0)
+
+    def test_publish_retryable_failure_keeps_task_in_publishing_for_stage_retry(self) -> None:
         uow = InMemoryUnitOfWork()
         upload_id = self._create_processing_upload(uow)
         uow.tasks.create_many([self._task(upload_id=upload_id, status=TaskStatus.PUBLISHING)])
@@ -246,14 +270,60 @@ class PublishTaskUseCaseTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "PUBLISH_ADAPTER_ERROR")
-        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.QUEUED)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.PUBLISHING)
         self.assertIsNone(uow.tasks.tasks[1].completed_at)
         self.assertEqual(uow.tasks.tasks[1].retry_count, 1)
+        self.assertIsNotNone(uow.tasks.tasks[1].next_attempt_at)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.PROCESSING)
 
         publication = uow.publications.get_latest_for_task(1)
         self.assertIsNotNone(publication)
         self.assertEqual(publication.publication_status, PublicationStatus.FAILED)
+
+    def test_publish_retry_uses_failed_publication_payload_as_resume_input(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload_id = self._create_processing_upload(uow)
+        uow.tasks.create_many([self._task(upload_id=upload_id, status=TaskStatus.PUBLISHING)])
+        self._seed_successful_render(uow, task_id=1)
+
+        partial_payload = {
+            "delivery": "telegram_bot_api",
+            "photo_sent": True,
+            "sent_chunk_indices": [0],
+            "delivery_progress": {
+                "photo_sent": True,
+                "sent_chunk_indices": [0],
+                "external_message_id": "123",
+            },
+            "delivery_projection_hash": "abc",
+            "external_message_id": "123",
+        }
+
+        first_publication = uow.publications.create_pending(
+            task_id=1,
+            target_channel="@news",
+            publish_mode="instant",
+            scheduled_for=None,
+        )
+        uow.publications.mark_failed(
+            first_publication.id,
+            error_message="TELEGRAM_HTTP_ERROR: timeout",
+            publisher_payload_json=partial_payload,
+        )
+
+        publisher = FakePublisher(error=ExternalDependencyError(code="TELEGRAM_TIMEOUT", message="timeout", retryable=True))
+        use_case = PublishTaskUseCase(uow=uow, publisher=publisher, logger=logging.getLogger("test.publish"))
+
+        first_result = use_case.execute(PublishTaskCommand(task_id=1, changed_by="worker-1"))
+
+        self.assertFalse(first_result.success)
+        self.assertEqual(len(publisher.calls), 1)
+        self.assertEqual(publisher.calls[0]["resume_payload_json"], partial_payload)
+
+        latest_failed = uow.publications.get_latest_for_task(1)
+        self.assertIsNotNone(latest_failed)
+        self.assertEqual(latest_failed.publication_status, PublicationStatus.FAILED)
+        self.assertEqual(latest_failed.publisher_payload_json, partial_payload)
 
     def test_publish_retryable_failure_exhausted_attempts_marks_failed(self) -> None:
         uow = InMemoryUnitOfWork()
@@ -272,6 +342,7 @@ class PublishTaskUseCaseTests(unittest.TestCase):
         self.assertEqual(result.error_code, "PUBLISH_ADAPTER_ERROR")
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.tasks.tasks[1].retry_count, TASK_MAX_RETRY_ATTEMPTS + 1)
+        self.assertIsNone(uow.tasks.tasks[1].next_attempt_at)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.FAILED)
 
     def test_publish_non_retryable_error_marks_failed_without_retry_increment(self) -> None:
@@ -287,6 +358,34 @@ class PublishTaskUseCaseTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "PUBLISH_CHANNEL_EMPTY")
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
+        self.assertEqual(uow.tasks.tasks[1].retry_count, 0)
+
+    def test_publish_chat_not_found_maps_to_bot_not_in_channel_error_code(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload_id = self._create_processing_upload(uow)
+        uow.tasks.create_many([self._task(upload_id=upload_id, status=TaskStatus.PUBLISHING)])
+        self._seed_successful_render(uow, task_id=1)
+
+        publisher = FakePublisher(
+            error=ExternalDependencyError(
+                code="TELEGRAM_HTTP_ERROR",
+                message="Telegram HTTP request failed.",
+                details={
+                    "status": 400,
+                    "reason": "Bad Request",
+                    "body": '{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}',
+                    "method": "sendMessage",
+                },
+                retryable=False,
+            )
+        )
+        use_case = PublishTaskUseCase(uow=uow, publisher=publisher, logger=logging.getLogger("test.publish"))
+
+        result = use_case.execute(PublishTaskCommand(task_id=1, changed_by="worker-1"))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "PUBLISH_BOT_NOT_IN_CHANNEL")
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.tasks.tasks[1].retry_count, 0)
 

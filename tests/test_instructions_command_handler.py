@@ -12,6 +12,7 @@ from post_bot.application.use_cases.open_instructions import OpenInstructionsUse
 from post_bot.bot.handlers.instructions_command import HandleInstructionsCommand, InstructionsCommandHandler  # noqa: E402
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
+from post_bot.shared.localization import get_message  # noqa: E402
 
 class FakeInstructionBundleProvider:
     def __init__(self, bundle: InstructionBundle) -> None:
@@ -50,7 +51,7 @@ class InstructionsCommandHandlerTests(unittest.TestCase):
         self.assertEqual(result.readme_file_name, "README.es.txt")
         self.assertEqual(result.template_bytes, b"template-bytes")
         self.assertEqual(result.readme_bytes, b"readme-bytes")
-        self.assertEqual(result.response_text, "Sube tu archivo Excel.")
+        self.assertEqual(result.response_text, get_message(InterfaceLanguage.ES, "UPLOAD_PROMPT"))
 
 
 if __name__ == "__main__":

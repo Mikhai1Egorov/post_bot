@@ -99,6 +99,29 @@ class _FakeTelegramGateway:
         return self._next_result()
 
 
+class _FailingTelegramGateway(_FakeTelegramGateway):
+    def __init__(self, *, fail_on_message_call: int) -> None:
+        super().__init__(return_message_ids=True)
+        self._fail_on_message_call = fail_on_message_call
+
+    def send_message(
+        self,
+        *,
+        chat_id: int | str,
+        text: str,
+        reply_markup: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        call_number = len(self.calls) + 1
+        if call_number == self._fail_on_message_call:
+            raise ExternalDependencyError(
+                code="TELEGRAM_HTTP_ERROR",
+                message="Telegram HTTP request failed.",
+                details={"status": 502, "method": "sendMessage"},
+                retryable=True,
+            )
+        return super().send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+
+
 class ExternalAdaptersTests(unittest.TestCase):
     def test_research_client_parses_sources_from_model_json(self) -> None:
         client = OpenAIResearchClient(api_key="sk-test", model_name="gpt-test")
@@ -580,6 +603,50 @@ class ExternalAdaptersTests(unittest.TestCase):
         self.assertIn("Title", str(gateway.calls[0]["text"]))
         self.assertEqual(payload["publisher_branch"], "image_fallback_to_text")
         self.assertEqual(payload["image_fallback_reason"], "IMAGE_PAYLOAD_UNSUPPORTED")
+
+    def test_telegram_publisher_resume_skips_already_sent_photo_and_chunks(self) -> None:
+        long_words_one = "alpha " * 2500
+        long_words_two = "beta " * 2500
+        html = (
+            "<article><h1>Title</h1>"
+            "<p>Lead paragraph.</p>"
+            "<figure><img src=\"https://picsum.photos/seed/resume/1600/900\" alt=\"Cover\" /></figure>"
+            "<h2>Section 1</h2>"
+            f"<p>{long_words_one}</p>"
+            "<h2>Section 2</h2>"
+            f"<p>{long_words_two}</p>"
+            "</article>"
+        )
+
+        failing_gateway = _FailingTelegramGateway(fail_on_message_call=2)
+        failing_publisher = TelegramBotPublisher(gateway=failing_gateway)
+
+        with self.assertRaises(ExternalDependencyError) as context:
+            failing_publisher.publish(channel="@news", html=html, scheduled_for=None)
+
+        error_payload = context.exception.details.get("publisher_payload_json")
+        self.assertIsInstance(error_payload, dict)
+        payload_dict = dict(error_payload or {})
+        self.assertTrue(bool(payload_dict.get("photo_sent")))
+        sent_chunk_indices = payload_dict.get("sent_chunk_indices") or []
+        self.assertIn(0, sent_chunk_indices)
+        first_sent_chunk = str(failing_gateway.calls[0]["text"])
+
+        retry_gateway = _FakeTelegramGateway(return_message_ids=True)
+        retry_publisher = TelegramBotPublisher(gateway=retry_gateway)
+        external_id, retry_payload = retry_publisher.publish(
+            channel="@news",
+            html=html,
+            scheduled_for=None,
+            resume_payload_json=payload_dict,
+        )
+
+        self.assertIsNotNone(external_id)
+        self.assertEqual(len(retry_gateway.photo_calls), 0)
+        self.assertGreaterEqual(len(retry_gateway.calls), 1)
+        self.assertTrue(all(str(call["text"]) != first_sent_chunk for call in retry_gateway.calls))
+        self.assertTrue(bool(retry_payload.get("photo_sent")))
+        self.assertGreaterEqual(int(retry_payload.get("parts_sent", 0)), 2)
     def test_telegram_publisher_rejects_invite_link_channel(self) -> None:
         gateway = _FakeTelegramGateway()
         publisher = TelegramBotPublisher(gateway=gateway)
@@ -608,6 +675,54 @@ class ExternalAdaptersTests(unittest.TestCase):
         self.assertIn("Title", text)
         self.assertIn("Hello", text)
         self.assertNotIn("<h1>", text)
+
+    def test_telegram_publisher_http_400_is_non_retryable(self) -> None:
+        publisher = TelegramBotPublisher(bot_token="123:abc")
+        http_error = HTTPError(
+            url="https://api.telegram.org/bot123:abc/sendMessage",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=BytesIO(b'{"ok":false,"description":"Bad Request: chat not found"}'),
+        )
+
+        with patch("post_bot.infrastructure.external.telegram_publisher.urlopen", side_effect=http_error):
+            with self.assertRaises(ExternalDependencyError) as context:
+                publisher.publish(
+                    channel="@news",
+                    html="<article><h1>Title</h1><p>Hello</p></article>",
+                    scheduled_for=None,
+                )
+
+        error = context.exception
+        self.assertEqual(error.code, "TELEGRAM_HTTP_ERROR")
+        self.assertFalse(error.retryable)
+        self.assertEqual(error.details.get("status"), 400)
+        self.assertEqual(error.details.get("method"), "sendMessage")
+        self.assertIn("chat not found", str(error.details.get("body")))
+
+    def test_telegram_publisher_http_503_is_retryable(self) -> None:
+        publisher = TelegramBotPublisher(bot_token="123:abc")
+        http_error = HTTPError(
+            url="https://api.telegram.org/bot123:abc/sendMessage",
+            code=503,
+            msg="Service Unavailable",
+            hdrs={},
+            fp=BytesIO(b'{"ok":false,"description":"Service unavailable"}'),
+        )
+
+        with patch("post_bot.infrastructure.external.telegram_publisher.urlopen", side_effect=http_error):
+            with self.assertRaises(ExternalDependencyError) as context:
+                publisher.publish(
+                    channel="@news",
+                    html="<article><h1>Title</h1><p>Hello</p></article>",
+                    scheduled_for=None,
+                )
+
+        error = context.exception
+        self.assertEqual(error.code, "TELEGRAM_HTTP_ERROR")
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.details.get("status"), 503)
 
 
 if __name__ == "__main__":

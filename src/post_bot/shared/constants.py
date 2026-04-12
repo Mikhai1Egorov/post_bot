@@ -34,6 +34,8 @@ DEFAULT_STYLE: str = StyleCode.JOURNALISTIC.value
 DEFAULT_LENGTH: str = ContentLength.MEDIUM.value
 DEFAULT_INCLUDE_IMAGE: str = IncludeImageExcelValue.FALSE.value
 TASK_MAX_RETRY_ATTEMPTS: int = 3
+TASK_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 300)
+WORKER_TASK_LEASE_SECONDS: int = 120
 
 SCHEDULE_DATETIME_FORMAT: str = "%Y-%m-%d %H:%M"
 

@@ -49,7 +49,7 @@ class LanguageSelectionHandler:
 
         available = self._get_available_posts.execute(GetAvailablePostsCommand(user_id=ensured.user_id))
 
-        response_text = "\n".join(
+        response_text = "\n\n".join(
             [
                 get_message(
                     command.interface_language,

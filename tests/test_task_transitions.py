@@ -46,7 +46,20 @@ class TaskTransitionTests(unittest.TestCase):
         ensure_task_transition(TaskStatus.PREPARING, TaskStatus.QUEUED)
         ensure_task_transition(TaskStatus.RESEARCHING, TaskStatus.QUEUED)
         ensure_task_transition(TaskStatus.GENERATING, TaskStatus.QUEUED)
-        ensure_task_transition(TaskStatus.PUBLISHING, TaskStatus.QUEUED)
+
+    def test_delivery_transitions_do_not_fall_back_to_content_queue(self) -> None:
+        with self.assertRaises(BusinessRuleError):
+            ensure_task_transition(TaskStatus.PUBLISHING, TaskStatus.QUEUED)
+        with self.assertRaises(BusinessRuleError):
+            ensure_task_transition(TaskStatus.READY_FOR_APPROVAL, TaskStatus.QUEUED)
+
+    def test_illegal_backward_transitions_are_rejected(self) -> None:
+        with self.assertRaises(BusinessRuleError):
+            ensure_task_transition(TaskStatus.READY_FOR_APPROVAL, TaskStatus.PREPARING)
+        with self.assertRaises(BusinessRuleError):
+            ensure_task_transition(TaskStatus.PUBLISHING, TaskStatus.PREPARING)
+        with self.assertRaises(BusinessRuleError):
+            ensure_task_transition(TaskStatus.DONE, TaskStatus.QUEUED)
     def test_invalid_transition_raises(self) -> None:
         with self.assertRaises(BusinessRuleError):
             ensure_task_transition(TaskStatus.CREATED, TaskStatus.GENERATING)

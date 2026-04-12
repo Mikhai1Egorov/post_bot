@@ -55,15 +55,28 @@ class ApprovalActionHandler:
                     error_code=None,
                     response_text=get_message(command.interface_language, "APPROVAL_PUBLISH_SUCCESS"),
                 )
+            if result.error_code == "APPROVAL_BATCH_ALREADY_DOWNLOADED":
+                response_text = get_message(
+                    command.interface_language,
+                    "APPROVAL_PUBLISH_AFTER_DOWNLOAD_FORBIDDEN",
+                )
+            elif result.error_code == "PUBLISH_BOT_NOT_IN_CHANNEL":
+                response_text = get_message(
+                    command.interface_language,
+                    "PUBLISH_BOT_NOT_IN_CHANNEL",
+                )
+            else:
+                response_text = get_message(
+                    command.interface_language,
+                    "APPROVAL_ACTION_FAILED",
+                    error_code=result.error_code or "UNKNOWN",
+                )
+
             return HandleApprovalActionResult(
                 success=False,
                 action=command.action,
                 error_code=result.error_code,
-                response_text=get_message(
-                    command.interface_language,
-                    "APPROVAL_ACTION_FAILED",
-                    error_code=result.error_code or "UNKNOWN",
-                ),
+                response_text=response_text,
             )
 
         result = self._download_approval_batch.execute(
@@ -80,13 +93,21 @@ class ApprovalActionHandler:
                 zip_payload=payload,
             )
 
+        if result.error_code == "APPROVAL_BATCH_ALREADY_PUBLISHED":
+            response_text = get_message(
+                command.interface_language,
+                "APPROVAL_DOWNLOAD_AFTER_PUBLISH_FORBIDDEN",
+            )
+        else:
+            response_text = get_message(
+                command.interface_language,
+                "APPROVAL_ACTION_FAILED",
+                error_code=result.error_code or "UNKNOWN",
+            )
+
         return HandleApprovalActionResult(
             success=False,
             action=command.action,
             error_code=result.error_code,
-            response_text=get_message(
-                command.interface_language,
-                "APPROVAL_ACTION_FAILED",
-                error_code=result.error_code or "UNKNOWN",
-            ),
+            response_text=response_text,
         )

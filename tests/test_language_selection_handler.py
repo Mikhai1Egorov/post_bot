@@ -35,7 +35,7 @@ class LanguageSelectionHandlerTests(unittest.TestCase):
         self.assertEqual(result.user_id, 1)
         self.assertTrue(result.created)
         self.assertEqual(result.interface_language, InterfaceLanguage.ES)
-        self.assertIn("Available posts count: 0.", result.response_text)
+        self.assertIn("Available posts count: 33.", result.response_text)
         self.assertIn("Sube tu archivo Excel.", result.response_text)
 
     def test_handle_updates_existing_user_language(self) -> None:

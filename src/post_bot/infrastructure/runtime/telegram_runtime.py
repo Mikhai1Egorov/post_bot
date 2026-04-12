@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import time
 from logging import Logger
 from typing import Any, Protocol
 
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsCommand, GetAvailablePostsUseCase
 from post_bot.application.use_cases.get_user_context import GetUserContextCommand, GetUserContextUseCase
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase
 from post_bot.application.use_cases.mark_approval_batch_notified import (
@@ -18,11 +20,35 @@ from post_bot.bot.handlers.approval_batch_command import HandleBuildApprovalBatc
 from post_bot.bot.handlers.instructions_command import HandleInstructionsCommand
 from post_bot.bot.handlers.language_selection import HandleLanguageSelectionCommand
 from post_bot.bot.handlers.telegram_upload_command import HandleTelegramUploadCommand
+from post_bot.infrastructure.runtime.anti_spam import CallbackDebounceCache, FixedWindowRateLimiter
 from post_bot.infrastructure.runtime.bot_wiring import BotWiring
 from post_bot.shared.enums import InterfaceLanguage
 from post_bot.shared.errors import AppError, BusinessRuleError, ValidationError
 from post_bot.shared.localization import get_message, parse_interface_language
 from post_bot.shared.logging import TimedLog, log_event
+
+
+THROTTLE_RULES: dict[str, tuple[int, float, str | None]] = {
+    "command_start": (5, 10.0, None),
+    "command_language": (5, 10.0, None),
+    "command_help": (5, 10.0, None),
+    "callback_lang": (5, 10.0, None),
+    "callback_instructions": (3, 10.0, "THROTTLED_RETRY_SHORT"),
+    "callback_publish": (3, 10.0, "THROTTLED_RETRY_SHORT"),
+    "callback_download": (3, 10.0, "THROTTLED_RETRY_SHORT"),
+    "callback_upload_prompt": (3, 10.0, "THROTTLED_RETRY_SHORT"),
+    "upload_document": (3, 20.0, "UPLOAD_TOO_FREQUENT"),
+}
+CALLBACK_DEBOUNCE_TTL_SECONDS = 2.0
+DEFAULT_APPROVAL_DISPATCH_INTERVAL_SECONDS = 5.0
+DEFAULT_APPROVAL_DISPATCH_BATCH_LIMIT = 20
+DEFAULT_MAX_UPLOAD_SIZE_BYTES = 8 * 1024 * 1024
+ALLOWED_UPLOAD_EXTENSIONS = {".xlsx"}
+ALLOWED_UPLOAD_MIME_TYPES = {
+    "application/octet-stream",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -50,6 +76,10 @@ class TelegramGatewayPort(Protocol):
     def answer_callback_query(self, *, callback_query_id: str) -> None: ...
 
 
+class TelegramUpdateCheckpointPort(Protocol):
+    def save(self, *, offset: int) -> None: ...
+
+
 @dataclass(slots=True, frozen=True)
 class TelegramRuntimeCommand:
     max_cycles: int | None = None
@@ -57,6 +87,8 @@ class TelegramRuntimeCommand:
     poll_timeout_seconds: int = 30
     idle_sleep_seconds: float = 0.2
     offset: int | None = None
+    approval_dispatch_interval_seconds: float = DEFAULT_APPROVAL_DISPATCH_INTERVAL_SECONDS
+    approval_dispatch_batch_limit: int = DEFAULT_APPROVAL_DISPATCH_BATCH_LIMIT
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,17 +109,32 @@ class TelegramPollingRuntime:
         *,
         gateway: TelegramGatewayPort,
         bot_wiring: BotWiring,
+        get_available_posts: GetAvailablePostsUseCase,
         get_user_context: GetUserContextUseCase,
         list_pending_approval_notifications: ListPendingApprovalNotificationsUseCase,
         mark_approval_batch_notified: MarkApprovalBatchNotifiedUseCase,
         logger: Logger,
+        update_checkpoint: TelegramUpdateCheckpointPort | None = None,
+        now_provider: Callable[[], float] | None = None,
+        rate_limiter: FixedWindowRateLimiter | None = None,
+        callback_debounce_cache: CallbackDebounceCache | None = None,
+        max_upload_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_BYTES,
     ) -> None:
         self._gateway = gateway
         self._bot = bot_wiring
+        self._get_available_posts = get_available_posts
         self._get_user_context = get_user_context
         self._list_pending_approval_notifications = list_pending_approval_notifications
         self._mark_approval_batch_notified = mark_approval_batch_notified
         self._logger = logger
+        self._update_checkpoint = update_checkpoint
+        self._now_provider = now_provider or time.monotonic
+        self._rate_limiter = rate_limiter or FixedWindowRateLimiter(now_provider=self._now_provider)
+        self._callback_debounce = callback_debounce_cache or CallbackDebounceCache(
+            now_provider=self._now_provider,
+            ttl_seconds=CALLBACK_DEBOUNCE_TTL_SECONDS,
+        )
+        self._max_upload_size_bytes = max_upload_size_bytes
 
     def run(self, command: TelegramRuntimeCommand) -> TelegramRuntimeResult:
         if command.max_cycles is not None and command.max_cycles < 1:
@@ -114,6 +161,18 @@ class TelegramPollingRuntime:
                 message="idle_sleep_seconds must be >= 0.",
                 details={"idle_sleep_seconds": command.idle_sleep_seconds},
             )
+        if command.approval_dispatch_interval_seconds < 0:
+            raise BusinessRuleError(
+                code="TELEGRAM_APPROVAL_DISPATCH_INTERVAL_INVALID",
+                message="approval_dispatch_interval_seconds must be >= 0.",
+                details={"approval_dispatch_interval_seconds": command.approval_dispatch_interval_seconds},
+            )
+        if command.approval_dispatch_batch_limit < 1:
+            raise BusinessRuleError(
+                code="TELEGRAM_APPROVAL_DISPATCH_BATCH_LIMIT_INVALID",
+                message="approval_dispatch_batch_limit must be >= 1.",
+                details={"approval_dispatch_batch_limit": command.approval_dispatch_batch_limit},
+            )
 
         offset = command.offset
         cycles_executed = 0
@@ -121,6 +180,7 @@ class TelegramPollingRuntime:
         updates_failed = 0
         failed_cycles = 0
         terminated_early = False
+        last_approval_dispatch_at: float = -1_000_000_000.0
 
         while True:
             if command.max_cycles is not None and cycles_executed >= command.max_cycles:
@@ -174,6 +234,7 @@ class TelegramPollingRuntime:
                 update_id = self._read_update_id(update)
                 if update_id is not None:
                     offset = update_id + 1
+                    self._persist_update_offset(offset)
 
                 try:
                     handled = self._handle_update(update)
@@ -211,33 +272,37 @@ class TelegramPollingRuntime:
                         error=wrapped_error,
                     )
 
-            try:
-                self._dispatch_pending_approval_notifications()
-            except AppError as error:
-                cycle_failed = True
-                log_event(
-                    self._logger,
-                    level=40,
-                    module="infrastructure.telegram.runtime",
-                    action="approval_notifications_dispatch",
-                    result="failure",
-                    error=error,
-                )
-            except Exception as exc:  # noqa: BLE001
-                cycle_failed = True
-                log_event(
-                    self._logger,
-                    level=40,
-                    module="infrastructure.telegram.runtime",
-                    action="approval_notifications_dispatch",
-                    result="failure",
-                    error=AppError(
-                        code="TELEGRAM_APPROVAL_DISPATCH_UNHANDLED_ERROR",
-                        message="Unhandled approval dispatch error.",
-                        details={"exception": str(exc)},
-                        retryable=False,
-                    ),
-                )
+            now_value = self._now_provider()
+            if now_value - last_approval_dispatch_at >= command.approval_dispatch_interval_seconds:
+                try:
+                    self._dispatch_pending_approval_notifications(limit=command.approval_dispatch_batch_limit)
+                except AppError as error:
+                    cycle_failed = True
+                    log_event(
+                        self._logger,
+                        level=40,
+                        module="infrastructure.telegram.runtime",
+                        action="approval_notifications_dispatch",
+                        result="failure",
+                        error=error,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    cycle_failed = True
+                    log_event(
+                        self._logger,
+                        level=40,
+                        module="infrastructure.telegram.runtime",
+                        action="approval_notifications_dispatch",
+                        result="failure",
+                        error=AppError(
+                            code="TELEGRAM_APPROVAL_DISPATCH_UNHANDLED_ERROR",
+                            message="Unhandled approval dispatch error.",
+                            details={"exception": str(exc)},
+                            retryable=False,
+                        ),
+                    )
+                finally:
+                    last_approval_dispatch_at = now_value
 
             if cycle_failed:
                 failed_cycles += 1
@@ -320,8 +385,18 @@ class TelegramPollingRuntime:
             return False
 
         chat_id = self._message_chat_id(message)
-        if chat_id is None:
+        telegram_user_id = self._message_user_id(message)
+        if chat_id is None or telegram_user_id is None:
             return False
+
+        action_name = f"command_{command.removeprefix('/')}"
+        if not self._is_action_allowed(
+            telegram_user_id=telegram_user_id,
+            action_name=action_name,
+            chat_id=chat_id,
+            language=InterfaceLanguage.EN,
+        ):
+            return True
 
         self._send_language_prompt(chat_id)
         return True
@@ -335,6 +410,26 @@ class TelegramPollingRuntime:
         context = self._get_user_context.execute(GetUserContextCommand(telegram_user_id=telegram_user_id))
         if not context.found or context.user_id is None or context.interface_language is None:
             self._send_language_prompt(chat_id)
+            return True
+
+        if not self._is_action_allowed(
+            telegram_user_id=telegram_user_id,
+            action_name="upload_document",
+            chat_id=chat_id,
+            language=context.interface_language,
+        ):
+            return True
+
+        metadata_error_message = self._validate_upload_document_metadata(
+            document=document,
+            language=context.interface_language,
+        )
+        if metadata_error_message is not None:
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=metadata_error_message,
+                reply_markup=self._action_keyboard(context.interface_language),
+            )
             return True
 
         file_id = document.get("file_id")
@@ -390,8 +485,25 @@ class TelegramPollingRuntime:
         if chat_id is None or telegram_user_id is None:
             return False
 
+        callback_message_id = self._callback_message_id(callback_query)
+        if self._is_callback_rapid_duplicate(
+            telegram_user_id=telegram_user_id,
+            callback_data=data,
+            callback_message_id=callback_message_id,
+        ):
+            return True
+
         if data.startswith("lang:"):
             language_code = data.split(":", 1)[1].strip()
+            if language_code == "header":
+                return True
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_lang",
+                chat_id=chat_id,
+                language=InterfaceLanguage.EN,
+            ):
+                return True
             language = parse_interface_language(language_code)
             result = self._bot.language_selection.handle(
                 HandleLanguageSelectionCommand(
@@ -412,6 +524,13 @@ class TelegramPollingRuntime:
             return True
 
         if data == "instructions":
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_instructions",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
             result = self._bot.instructions.handle(
                 HandleInstructionsCommand(
                     user_id=context.user_id,
@@ -436,6 +555,13 @@ class TelegramPollingRuntime:
             return True
 
         if data == "upload":
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_upload_prompt",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
             self._gateway.send_message(
                 chat_id=chat_id,
                 text=get_message(context.interface_language, "UPLOAD_PROMPT"),
@@ -444,6 +570,13 @@ class TelegramPollingRuntime:
             return True
 
         if data.startswith("approval_publish:"):
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_publish",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
             batch_id = self._parse_batch_id(data, prefix="approval_publish:")
             result = self._bot.approval_action.handle(
                 HandleApprovalActionCommand(
@@ -461,6 +594,13 @@ class TelegramPollingRuntime:
             return True
 
         if data.startswith("approval_download:"):
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_download",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
             batch_id = self._parse_batch_id(data, prefix="approval_download:")
             result = self._bot.approval_action.handle(
                 HandleApprovalActionCommand(
@@ -485,17 +625,28 @@ class TelegramPollingRuntime:
 
         return False
 
-    def _dispatch_pending_approval_notifications(self) -> None:
-        pending = self._list_pending_approval_notifications.execute()
+    def _dispatch_pending_approval_notifications(self, *, limit: int) -> None:
+        pending = self._list_pending_approval_notifications.execute(limit=limit)
+        dispatched_count = 0
+
         for notification in pending.notifications:
+            available_posts = self._get_available_posts.execute(
+                GetAvailablePostsCommand(user_id=notification.user_id)
+            ).available_posts_count
             for upload_id in notification.upload_ids:
+                if dispatched_count >= limit:
+                    return
+
                 build_result = self._bot.build_approval_batch.handle(HandleBuildApprovalBatchCommand(upload_id=upload_id))
                 if not build_result.success or build_result.batch_id is None:
                     continue
 
                 self._gateway.send_message(
                     chat_id=notification.telegram_user_id,
-                    text=get_message(notification.interface_language, "APPROVAL_READY"),
+                    text=self._build_approval_ready_text(
+                        language=notification.interface_language,
+                        available_posts_count=available_posts,
+                    ),
                     reply_markup=self._approval_keyboard(
                         language=notification.interface_language,
                         batch_id=build_result.batch_id,
@@ -517,6 +668,7 @@ class TelegramPollingRuntime:
                             "error_code": notified_result.error_code,
                         },
                     )
+                dispatched_count += 1
 
     @staticmethod
     def _parse_batch_id(data: str, *, prefix: str) -> int:
@@ -540,14 +692,18 @@ class TelegramPollingRuntime:
     def _send_language_prompt(self, chat_id: int) -> None:
         self._gateway.send_message(
             chat_id=chat_id,
-            text=get_message(InterfaceLanguage.EN, "SELECT_INTERFACE_LANGUAGE"),
+            text="\u2063",
             reply_markup=self._language_keyboard(),
         )
 
     @staticmethod
     def _language_keyboard() -> dict[str, object]:
+        header_text = get_message(InterfaceLanguage.EN, "SELECT_INTERFACE_LANGUAGE")
         return {
             "inline_keyboard": [
+                [
+                    {"text": header_text, "callback_data": "lang:header"},
+                ],
                 [
                     {"text": "\U0001F1EC\U0001F1E7 English", "callback_data": "lang:en"},
                     {"text": "\U0001F1F7\U0001F1FA Russian", "callback_data": "lang:ru"},
@@ -556,6 +712,8 @@ class TelegramPollingRuntime:
                 [
                     {"text": "\U0001F1EA\U0001F1F8 Spanish", "callback_data": "lang:es"},
                     {"text": "\U0001F1E8\U0001F1F3 Chinese", "callback_data": "lang:zh"},
+                ],
+                [
                     {"text": "\U0001F1EE\U0001F1F3 Hindi", "callback_data": "lang:hi"},
                     {"text": "\U0001F1F8\U0001F1E6 Arabic", "callback_data": "lang:ar"},
                 ],
@@ -570,12 +728,6 @@ class TelegramPollingRuntime:
                     {
                         "text": f"\U0001F4D8 {get_message(language, 'BUTTON_HOW_TO_USE')}",
                         "callback_data": "instructions",
-                    }
-                ],
-                [
-                    {
-                        "text": f"\U0001F4CA {get_message(language, 'BUTTON_UPLOAD_TASKS')}",
-                        "callback_data": "upload",
                     }
                 ],
             ]
@@ -597,6 +749,125 @@ class TelegramPollingRuntime:
                 ],
             ]
         }
+    @staticmethod
+    def _build_approval_ready_text(*, language: InterfaceLanguage, available_posts_count: int) -> str:
+        base_text = get_message(language, "APPROVAL_READY")
+        available_text = get_message(language, "AVAILABLE_POSTS", available=available_posts_count)
+        return f"\u2705 {base_text}\n\n{available_text}"
+
+    def _persist_update_offset(self, offset: int) -> None:
+        if self._update_checkpoint is None:
+            return
+        try:
+            self._update_checkpoint.save(offset=offset)
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                self._logger,
+                level=30,
+                module="infrastructure.telegram.runtime",
+                action="update_checkpoint_save_failed",
+                result="failure",
+                extra={"offset": offset, "error": str(exc)},
+            )
+
+    def _is_action_allowed(
+        self,
+        *,
+        telegram_user_id: int,
+        action_name: str,
+        chat_id: int,
+        language: InterfaceLanguage,
+    ) -> bool:
+        rule = THROTTLE_RULES.get(action_name)
+        if rule is None:
+            return True
+
+        limit, window_seconds, message_key = rule
+        allowed = self._rate_limiter.allow(
+            key=(telegram_user_id, action_name),
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+        if allowed:
+            return True
+
+        log_event(
+            self._logger,
+            level=20,
+            module="infrastructure.telegram.runtime",
+            action="throttle_rejected",
+            result="success",
+            extra={
+                "telegram_user_id": telegram_user_id,
+                "action_name": action_name,
+                "limit": limit,
+                "window_seconds": window_seconds,
+            },
+        )
+        if message_key is not None:
+            self._gateway.send_message(chat_id=chat_id, text=get_message(language, message_key))
+        return False
+
+    def _is_callback_rapid_duplicate(
+        self,
+        *,
+        telegram_user_id: int,
+        callback_data: str,
+        callback_message_id: int | None,
+    ) -> bool:
+        if not self._should_debounce_callback(callback_data):
+            return False
+
+        duplicate = self._callback_debounce.is_duplicate(
+            key=(telegram_user_id, callback_data, callback_message_id),
+        )
+        if duplicate:
+            log_event(
+                self._logger,
+                level=20,
+                module="infrastructure.telegram.runtime",
+                action="callback_debounce_hit",
+                result="success",
+                extra={
+                    "telegram_user_id": telegram_user_id,
+                    "callback_data": callback_data,
+                    "message_id": callback_message_id,
+                },
+            )
+        return duplicate
+
+    @staticmethod
+    def _should_debounce_callback(callback_data: str) -> bool:
+        return (
+            callback_data.startswith("lang:")
+            or callback_data == "instructions"
+            or callback_data.startswith("approval_publish:")
+            or callback_data.startswith("approval_download:")
+        )
+
+    def _validate_upload_document_metadata(
+        self,
+        *,
+        document: dict[str, Any],
+        language: InterfaceLanguage,
+    ) -> str | None:
+        file_name = document.get("file_name")
+        if not isinstance(file_name, str) or "." not in file_name:
+            return get_message(language, "UPLOAD_FILE_TYPE_UNSUPPORTED")
+
+        extension = file_name.rsplit(".", 1)[-1].lower()
+        if f".{extension}" not in ALLOWED_UPLOAD_EXTENSIONS:
+            return get_message(language, "UPLOAD_FILE_TYPE_UNSUPPORTED")
+
+        mime_type = document.get("mime_type")
+        if isinstance(mime_type, str) and mime_type and mime_type.lower() not in ALLOWED_UPLOAD_MIME_TYPES:
+            return get_message(language, "UPLOAD_FILE_TYPE_UNSUPPORTED")
+
+        file_size = document.get("file_size")
+        if isinstance(file_size, int) and file_size > self._max_upload_size_bytes:
+            max_size_mb = max(1, self._max_upload_size_bytes // (1024 * 1024))
+            return get_message(language, "UPLOAD_FILE_TOO_LARGE", max_size_mb=max_size_mb)
+        return None
 
     @staticmethod
     def _message_chat_id(message: dict[str, Any]) -> int | None:
@@ -634,6 +905,16 @@ class TelegramPollingRuntime:
         if not isinstance(user_id, int):
             return None
         return user_id
+
+    @staticmethod
+    def _callback_message_id(callback_query: dict[str, Any]) -> int | None:
+        message = callback_query.get("message")
+        if not isinstance(message, dict):
+            return None
+        message_id = message.get("message_id")
+        if not isinstance(message_id, int):
+            return None
+        return message_id
 
     def _notify_update_error(self, *, update: dict[str, Any], error: AppError) -> None:
         chat_id = self._update_chat_id(update)
@@ -703,6 +984,8 @@ class TelegramPollingRuntime:
 
     @staticmethod
     def _build_update_error_text(*, language: InterfaceLanguage, error: AppError) -> str:
+        if error.code == "PUBLISH_BOT_NOT_IN_CHANNEL":
+            return get_message(language, "PUBLISH_BOT_NOT_IN_CHANNEL")
         if isinstance(error, ValidationError) and error.code.startswith("EXCEL_"):
             return "\n".join(
                 (
@@ -733,10 +1016,3 @@ class TelegramPollingRuntime:
         if isinstance(callback_query, dict):
             return TelegramPollingRuntime._callback_user_id(callback_query)
         return None
-
-
-
-
-
-
-

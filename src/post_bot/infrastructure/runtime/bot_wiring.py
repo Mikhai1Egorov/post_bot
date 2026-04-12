@@ -163,6 +163,13 @@ def _build_default_publisher(config: AppConfig) -> PublisherPort:
     return LocalArtifactPublisher()
 
 
+def _instruction_template_candidates(*, project_root: Path) -> tuple[Path, ...]:
+    return (
+        project_root / "docs" / "NEO_TEMPLATE.xlsx",
+        project_root / "NEO_TEMPLATE.xlsx",
+    )
+
+
 def _readme_suffixes(language: InterfaceLanguage) -> tuple[str, ...]:
     if language == InterfaceLanguage.EN:
         # Support both ENG and EN naming, prefer ENG to match project files.
@@ -171,10 +178,18 @@ def _readme_suffixes(language: InterfaceLanguage) -> tuple[str, ...]:
 
 
 def _default_readme_candidates(*, project_root: Path, language: InterfaceLanguage) -> tuple[Path, ...]:
+    docs_root = project_root / "docs"
+    docs_readme_dir = docs_root / "readme"
     readme_dir = project_root / "readme"
+
     candidates: list[Path] = []
     for suffix in _readme_suffixes(language):
-        candidates.append(readme_dir / f"README_PIPELINE_{suffix}.txt")
+        file_name = f"README_PIPELINE_{suffix}.txt"
+        candidates.append(docs_readme_dir / file_name)
+        candidates.append(docs_root / file_name)
+        candidates.append(readme_dir / file_name)
+
+    candidates.append(docs_root / "README_PIPELINE.txt")
     candidates.append(project_root / "README_PIPELINE.txt")
     return tuple(candidates)
 
@@ -190,7 +205,9 @@ def _build_default_readme_paths_by_language(*, project_root: Path) -> dict[Inter
 
 def build_default_instruction_bundle_provider(*, project_root: str | Path) -> LocalInstructionBundleProvider:
     root = Path(project_root)
-    template_path = root / "NEO_TEMPLATE.xlsx"
+    template_candidates = _instruction_template_candidates(project_root=root)
+    template_path = next((path for path in template_candidates if path.exists()), template_candidates[0])
+
     return LocalInstructionBundleProvider(
         template_path=template_path,
         readme_paths_by_language=_build_default_readme_paths_by_language(project_root=root),
@@ -223,11 +240,3 @@ def build_default_bot_wiring(
         logger=logger,
         publisher=_build_default_publisher(config),
     )
-
-
-
-
-
-
-
-

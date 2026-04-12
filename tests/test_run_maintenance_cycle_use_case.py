@@ -204,6 +204,18 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
             ]
         )
 
+        uow.tasks.set_task_lease(
+            1,
+            claimed_by="worker-stale",
+            claimed_at=datetime(2020, 1, 1, 0, 0, 0),
+            lease_until=datetime(2020, 1, 1, 0, 0, 0),
+        )
+        uow.tasks.set_task_lease(
+            2,
+            claimed_by="worker-active",
+            claimed_at=datetime.now().replace(tzinfo=None),
+            lease_until=datetime.now().replace(tzinfo=None),
+        )
         uow.tasks.updated_at_by_task_id[1] = datetime(2020, 1, 1, 0, 0, 0)
 
         use_case = self._build_use_case(uow=uow, storage=storage)
@@ -267,6 +279,44 @@ class RunMaintenanceCycleUseCaseTests(unittest.TestCase):
 
         self.assertEqual(result.cleanup_scanned_count, 0)
         self.assertEqual(result.cleanup_deleted_count, 0)
+        self.assertEqual(len(uow.artifacts.records), 1)
+
+    def test_cleanup_batch_limit_is_applied(self) -> None:
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+
+        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.tasks.create_many([self._task(1, upload.id, TaskStatus.DONE)])
+
+        for idx in range(3):
+            artifact_path = storage.save_task_artifact(
+                task_id=1,
+                artifact_type=ArtifactType.PREVIEW,
+                file_name=f"tmp_{idx}.txt",
+                content=b"tmp",
+            )
+            uow.artifacts.add_artifact(
+                task_id=1,
+                upload_id=upload.id,
+                artifact_type=ArtifactType.PREVIEW,
+                storage_path=artifact_path,
+                file_name=f"tmp_{idx}.txt",
+                mime_type="text/plain",
+                size_bytes=3,
+                is_final=False,
+            )
+
+        use_case = self._build_use_case(uow=uow, storage=storage)
+        result = use_case.execute(
+            RunMaintenanceCycleCommand(
+                cleanup_non_final_artifacts=True,
+                cleanup_batch_limit=2,
+            )
+        )
+
+        self.assertEqual(result.cleanup_scanned_count, 2)
+        self.assertEqual(result.cleanup_deleted_count, 2)
         self.assertEqual(len(uow.artifacts.records), 1)
 
     def test_expires_approval_batches_by_explicit_ids(self) -> None:

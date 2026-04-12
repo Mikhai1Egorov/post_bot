@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from post_bot.application.ports import InstructionBundle  # noqa: E402
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsUseCase  # noqa: E402
 from post_bot.application.use_cases.get_user_context import GetUserContextUseCase  # noqa: E402
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase  # noqa: E402
 from post_bot.application.use_cases.mark_approval_batch_notified import MarkApprovalBatchNotifiedUseCase  # noqa: E402
@@ -24,7 +25,8 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
     InMemoryFileStorage,
     InMemoryUnitOfWork,
 )
-from post_bot.shared.errors import AppError, BusinessRuleError, ValidationError  # noqa: E402
+from post_bot.shared.errors import AppError, BusinessRuleError, ExternalDependencyError, ValidationError  # noqa: E402
+from post_bot.shared.localization import get_message  # noqa: E402
 from post_bot.shared.enums import (  # noqa: E402
     ApprovalBatchStatus,
     ArtifactType,
@@ -121,6 +123,25 @@ class ExpiredCallbackTelegramGateway(FakeTelegramGateway):
             retryable=False,
         )
 
+
+class FakeClock:
+    def __init__(self, start: float = 0.0) -> None:
+        self.value = start
+
+    def now(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+class FakeUpdateCheckpoint:
+    def __init__(self) -> None:
+        self.saved_offsets: list[int] = []
+
+    def save(self, *, offset: int) -> None:
+        self.saved_offsets.append(offset)
+
 class TelegramRuntimeTests(unittest.TestCase):
 
     @staticmethod
@@ -131,6 +152,8 @@ class TelegramRuntimeTests(unittest.TestCase):
         storage: InMemoryFileStorage | None = None,
         publisher: FakePublisher | None = None,
         excel_parser: object | None = None,
+        now_provider=None,  # noqa: ANN001
+        update_checkpoint=None,  # noqa: ANN001
     ) -> TelegramPollingRuntime:
         parser = excel_parser or FakeExcelTaskParser(
             ParsedExcelData(
@@ -161,6 +184,10 @@ class TelegramRuntimeTests(unittest.TestCase):
             publisher=publisher,
         )
 
+        get_available_posts = GetAvailablePostsUseCase(
+            uow=uow,
+            logger=logging.getLogger("test.telegram.get_available_posts"),
+        )
         get_user_context = GetUserContextUseCase(
             uow=uow,
             logger=logging.getLogger("test.telegram.get_user_context"),
@@ -177,10 +204,13 @@ class TelegramRuntimeTests(unittest.TestCase):
         return TelegramPollingRuntime(
             gateway=gateway,
             bot_wiring=bot_wiring,
+            get_available_posts=get_available_posts,
             get_user_context=get_user_context,
             list_pending_approval_notifications=list_pending_approval_notifications,
             mark_approval_batch_notified=mark_approval_batch_notified,
             logger=logging.getLogger("test.telegram.runtime"),
+            now_provider=now_provider,
+            update_checkpoint=update_checkpoint,
         )
 
     @staticmethod
@@ -338,6 +368,7 @@ class TelegramRuntimeTests(unittest.TestCase):
         )
 
         uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=700, interface_language=InterfaceLanguage.EN)
         uow.balances.upsert_user_balance(
             BalanceSnapshot(user_id=1, available_articles_count=5, reserved_articles_count=0, consumed_articles_total=0)
         )
@@ -350,7 +381,12 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(result.next_offset, 5)
 
         self.assertGreaterEqual(len(gateway.sent_messages), 3)
-        self.assertTrue(any("Select interface language" in item["text"] for item in gateway.sent_messages))
+        language_prompt = gateway.sent_messages[0]
+        self.assertEqual(language_prompt["text"], "\u2063")
+        self.assertEqual(
+            language_prompt["reply_markup"]["inline_keyboard"][0][0]["text"],
+            "👇Язык👇Language👇Idioma👇",
+        )
         self.assertTrue(any("Available posts count: 5." in item["text"] for item in gateway.sent_messages))
         self.assertTrue(any("Processing has started." in item["text"] for item in gateway.sent_messages))
 
@@ -362,6 +398,203 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(len(uow.uploads.uploads), 1)
         upload = next(iter(uow.uploads.uploads.values()))
         self.assertEqual(upload.user_id, 1)
+
+    def test_persists_update_checkpoint_offsets(self) -> None:
+        updates = [
+            {
+                "update_id": 10,
+                "message": {
+                    "message_id": 1,
+                    "from": {"id": 801},
+                    "chat": {"id": 801},
+                    "text": "/start",
+                },
+            },
+            {
+                "update_id": 11,
+                "message": {
+                    "message_id": 2,
+                    "from": {"id": 801},
+                    "chat": {"id": 801},
+                    "text": "/help",
+                },
+            },
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        checkpoint = FakeUpdateCheckpoint()
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow, update_checkpoint=checkpoint)
+        runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(checkpoint.saved_offsets, [11, 12])
+
+    def test_throttles_repeated_start_commands(self) -> None:
+        updates = []
+        for idx in range(6):
+            updates.append(
+                {
+                    "update_id": idx + 1,
+                    "message": {
+                        "message_id": idx + 100,
+                        "from": {"id": 802},
+                        "chat": {"id": 802},
+                        "text": "/start",
+                    },
+                }
+            )
+
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        # Limit is 5 calls / 10s, so one command is safely dropped by throttling.
+        self.assertEqual(len(gateway.sent_messages), 5)
+
+    def test_debounces_rapid_identical_callbacks(self) -> None:
+        updates = [
+            {
+                "update_id": 20,
+                "callback_query": {
+                    "id": "cb-rapid-1",
+                    "from": {"id": 803},
+                    "message": {"message_id": 55, "chat": {"id": 803}},
+                    "data": "instructions",
+                },
+            },
+            {
+                "update_id": 21,
+                "callback_query": {
+                    "id": "cb-rapid-2",
+                    "from": {"id": 803},
+                    "message": {"message_id": 55, "chat": {"id": 803}},
+                    "data": "instructions",
+                },
+            },
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=803, interface_language=InterfaceLanguage.EN)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(gateway.answered_callbacks, ["cb-rapid-1", "cb-rapid-2"])
+        # Only first callback performs heavy instructions flow.
+        self.assertEqual(len(gateway.sent_documents), 2)
+
+    def test_rejects_upload_with_unsupported_extension_before_download(self) -> None:
+        updates = [
+            {
+                "update_id": 30,
+                "message": {
+                    "message_id": 300,
+                    "from": {"id": 804},
+                    "chat": {"id": 804},
+                    "document": {
+                        "file_id": "file-bad-ext",
+                        "file_name": "tasks.txt",
+                        "mime_type": "text/plain",
+                        "file_size": 1024,
+                    },
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=804, interface_language=InterfaceLanguage.EN)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(len(gateway.sent_messages), 1)
+        self.assertIn("Unsupported file type", gateway.sent_messages[0]["text"])
+
+    def test_limits_upload_spam_per_user(self) -> None:
+        updates = [
+            {
+                "update_id": 40,
+                "message": {
+                    "message_id": 400,
+                    "from": {"id": 805},
+                    "chat": {"id": 805},
+                    "document": {"file_id": "file-1", "file_name": "tasks.xlsx", "file_size": 2048},
+                },
+            },
+            {
+                "update_id": 41,
+                "message": {
+                    "message_id": 401,
+                    "from": {"id": 805},
+                    "chat": {"id": 805},
+                    "document": {"file_id": "file-2", "file_name": "tasks.xlsx", "file_size": 2048},
+                },
+            },
+            {
+                "update_id": 42,
+                "message": {
+                    "message_id": 402,
+                    "from": {"id": 805},
+                    "chat": {"id": 805},
+                    "document": {"file_id": "file-3", "file_name": "tasks.xlsx", "file_size": 2048},
+                },
+            },
+            {
+                "update_id": 43,
+                "message": {
+                    "message_id": 403,
+                    "from": {"id": 805},
+                    "chat": {"id": 805},
+                    # file-4 intentionally absent in files mapping:
+                    # test expects throttling to stop processing before download call.
+                    "document": {"file_id": "file-4", "file_name": "tasks.xlsx", "file_size": 2048},
+                },
+            },
+        ]
+        gateway = FakeTelegramGateway(
+            updates=updates,
+            files={
+                "file-1": TelegramDownloadedFile(file_name="tasks.xlsx", payload=b"x1"),
+                "file-2": TelegramDownloadedFile(file_name="tasks.xlsx", payload=b"x2"),
+                "file-3": TelegramDownloadedFile(file_name="tasks.xlsx", payload=b"x3"),
+            },
+        )
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=805, interface_language=InterfaceLanguage.EN)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertTrue(any("uploading too often" in item["text"].lower() for item in gateway.sent_messages))
+
+    def test_approval_dispatch_honors_interval_and_batch_limit(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        self._seed_approval_ready_task(uow=uow, storage=storage, telegram_user_id=806)
+        self._seed_approval_ready_task(uow=uow, storage=storage, telegram_user_id=806)
+
+        clock = FakeClock(start=0.0)
+        gateway = FakeTelegramGateway(updates=[], files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage, now_provider=clock.now)
+
+        result = runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=2,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+                approval_dispatch_interval_seconds=10.0,
+                approval_dispatch_batch_limit=1,
+            )
+        )
+
+        self.assertEqual(result.updates_failed, 0)
+        approval_messages = [msg for msg in gateway.sent_messages if "Materials are ready." in msg["text"]]
+        self.assertEqual(len(approval_messages), 1)
 
     def test_instructions_callback_without_language_requests_selection(self) -> None:
         updates = [
@@ -385,12 +618,21 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(result.updates_processed, 1)
         self.assertEqual(len(gateway.sent_documents), 0)
         self.assertEqual(len(gateway.sent_messages), 1)
-        self.assertIn("Select interface language", gateway.sent_messages[0]["text"])
+        self.assertEqual(gateway.sent_messages[0]["text"], "\u2063")
+        self.assertEqual(
+            gateway.sent_messages[0]["reply_markup"]["inline_keyboard"][0][0]["text"],
+            "👇Язык👇Language👇Idioma👇",
+        )
 
     def test_language_keyboard_contains_flags_for_all_languages(self) -> None:
         keyboard = TelegramPollingRuntime._language_keyboard()
         rows = keyboard["inline_keyboard"]
         labels = [button["text"] for row in rows for button in row]
+
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([len(row) for row in rows], [1, 3, 2, 2])
+        self.assertEqual(rows[0][0]["text"], "👇Язык👇Language👇Idioma👇")
+        self.assertEqual(rows[0][0]["callback_data"], "lang:header")
 
         self.assertIn("\U0001F1EC\U0001F1E7 English", labels)
         self.assertIn("\U0001F1F7\U0001F1FA Russian", labels)
@@ -404,11 +646,9 @@ class TelegramRuntimeTests(unittest.TestCase):
         keyboard = TelegramPollingRuntime._action_keyboard(InterfaceLanguage.RU)
         rows = keyboard["inline_keyboard"]
 
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 1)
         self.assertEqual(len(rows[0]), 1)
-        self.assertEqual(len(rows[1]), 1)
         self.assertEqual(rows[0][0]["callback_data"], "instructions")
-        self.assertEqual(rows[1][0]["callback_data"], "upload")
 
     def test_ignores_expired_callback_answer_error_and_processes_language_selection(self) -> None:
         updates = [
@@ -430,7 +670,7 @@ class TelegramRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.updates_failed, 0)
         self.assertEqual(result.updates_processed, 1)
-        self.assertTrue(any("Available posts count: 0." in item["text"] for item in gateway.sent_messages))
+        self.assertTrue(any("Available posts count: 33." in item["text"] for item in gateway.sent_messages))
 
     def test_dispatches_approval_ready_notification_once_per_runtime(self) -> None:
         storage = InMemoryFileStorage()
@@ -454,9 +694,10 @@ class TelegramRuntimeTests(unittest.TestCase):
         result = runtime.run(TelegramRuntimeCommand(max_cycles=2, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
 
         self.assertEqual(result.updates_failed, 0)
-        approval_messages = [msg for msg in gateway.sent_messages if msg["text"] == "Materials are ready."]
+        approval_messages = [msg for msg in gateway.sent_messages if "Materials are ready." in msg["text"]]
         self.assertEqual(len(approval_messages), 1)
-
+        self.assertIn("\u2705", approval_messages[0]["text"])
+        self.assertIn("Available posts count: 0.", approval_messages[0]["text"])
         keyboard = approval_messages[0]["reply_markup"]
         self.assertIsNotNone(keyboard)
         callback_data = [button["callback_data"] for button in keyboard["inline_keyboard"][0]]
@@ -510,6 +751,88 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(uow.approval_batches.records[batch_id].downloaded_at)
         self.assertEqual(uow.tasks.tasks[task_id].task_status, TaskStatus.DONE)
 
+    def test_download_after_publish_returns_explicit_forbidden_message(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id, task_id = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=712,
+            interface_language=InterfaceLanguage.RU,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id,
+            user_id=user_id,
+            task_id=task_id,
+        )
+        uow.approval_batches.set_status(batch_id, ApprovalBatchStatus.PUBLISHED)
+
+        updates = [
+            {
+                "update_id": 250,
+                "callback_query": {
+                    "id": "cb-download-published",
+                    "from": {"id": 712},
+                    "message": {"message_id": 3, "chat": {"id": 712}},
+                    "data": f"approval_download:{batch_id}",
+                },
+            }
+        ]
+
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage)
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(len(gateway.sent_documents), 0)
+        expected_text = get_message(InterfaceLanguage.RU, "APPROVAL_DOWNLOAD_AFTER_PUBLISH_FORBIDDEN")
+        self.assertTrue(any(expected_text in item["text"] for item in gateway.sent_messages))
+
+    def test_publish_after_download_returns_explicit_forbidden_message(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id, task_id = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=713,
+            interface_language=InterfaceLanguage.RU,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id,
+            user_id=user_id,
+            task_id=task_id,
+        )
+        uow.approval_batches.set_status(batch_id, ApprovalBatchStatus.DOWNLOADED)
+
+        updates = [
+            {
+                "update_id": 260,
+                "callback_query": {
+                    "id": "cb-publish-downloaded",
+                    "from": {"id": 713},
+                    "message": {"message_id": 3, "chat": {"id": 713}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            }
+        ]
+
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage)
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(len(gateway.sent_documents), 0)
+        expected_text = get_message(InterfaceLanguage.RU, "APPROVAL_PUBLISH_AFTER_DOWNLOAD_FORBIDDEN")
+        self.assertTrue(any(expected_text in item["text"] for item in gateway.sent_messages))
+
     def test_handles_approval_publish_callback(self) -> None:
         storage = InMemoryFileStorage()
         uow = InMemoryUnitOfWork()
@@ -556,6 +879,63 @@ class TelegramRuntimeTests(unittest.TestCase):
         publication = uow.publications.get_latest_for_task(task_id)
         self.assertIsNotNone(publication)
         self.assertEqual(publication.publication_status, PublicationStatus.PUBLISHED)
+
+    def test_publish_chat_not_found_shows_bot_not_in_channel_message(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id, task_id = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=714,
+            interface_language=InterfaceLanguage.RU,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id,
+            user_id=user_id,
+            task_id=task_id,
+        )
+
+        updates = [
+            {
+                "update_id": 301,
+                "callback_query": {
+                    "id": "cb-publish-chat-not-found",
+                    "from": {"id": 714},
+                    "message": {"message_id": 3, "chat": {"id": 714}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(
+            gateway=gateway,
+            uow=uow,
+            storage=storage,
+            publisher=FakePublisher(
+                error=ExternalDependencyError(
+                    code="TELEGRAM_HTTP_ERROR",
+                    message="Telegram HTTP request failed.",
+                    details={
+                        "status": 400,
+                        "reason": "Bad Request",
+                        "body": '{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}',
+                        "method": "sendMessage",
+                    },
+                    retryable=False,
+                )
+            ),
+        )
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        expected_text = get_message(InterfaceLanguage.RU, "PUBLISH_BOT_NOT_IN_CHANNEL")
+        self.assertTrue(any(expected_text in item["text"] for item in gateway.sent_messages))
+        self.assertEqual(uow.tasks.tasks[task_id].task_status, TaskStatus.FAILED)
+        self.assertEqual(uow.approval_batches.records[batch_id].batch_status, ApprovalBatchStatus.USER_NOTIFIED)
 
     def test_upload_parse_error_sends_localized_failure_message(self) -> None:
         updates = [
@@ -716,9 +1096,3 @@ class TelegramRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-
-

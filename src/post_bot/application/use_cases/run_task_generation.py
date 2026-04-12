@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from logging import Logger
 
 from post_bot.application.ports import LLMClientPort
+from post_bot.application.retry_backoff import calculate_next_attempt_at
 from post_bot.application.task_transitions import transition_task_status
 from post_bot.application.upload_status import resolve_upload_status_from_tasks
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
@@ -215,10 +216,12 @@ class RunTaskGenerationUseCase:
 
             retry_count = task.retry_count + 1 if error.retryable else task.retry_count
             queue_for_retry = error.retryable and retry_count <= TASK_MAX_RETRY_ATTEMPTS
+            next_attempt_at = calculate_next_attempt_at(retry_count=retry_count) if queue_for_retry else None
             self._uow.tasks.set_retry_state(
                 command.task_id,
                 retry_count=retry_count,
                 last_error_message=f"{error.code}: {error.message}",
+                next_attempt_at=next_attempt_at,
             )
             transition_task_status(
                 uow=self._uow,
@@ -247,6 +250,7 @@ class RunTaskGenerationUseCase:
                 "queued_for_retry": queue_for_retry,
                 "retry_count": retry_count,
                 "max_retry_attempts": TASK_MAX_RETRY_ATTEMPTS,
+                "next_attempt_at": next_attempt_at.isoformat(sep=" ") if next_attempt_at is not None else None,
             },
         )
         return RunTaskGenerationResult(

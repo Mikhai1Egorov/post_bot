@@ -73,6 +73,7 @@ class RunWorkerCycleUseCase:
                 ExecuteClaimedTaskCommand(
                     task_id=claim.task.id,
                     model_name=command.model_name,
+                    claimed_status=claim.task.task_status,
                     changed_by=command.worker_id,
                 )
             )

@@ -1,9 +1,9 @@
-﻿"""In-memory adapters for deterministic unit tests."""
+"""In-memory adapters for deterministic unit tests."""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime
 from io import BytesIO
 from threading import RLock
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -40,9 +40,10 @@ from post_bot.shared.enums import (
     UploadStatus,
     UserActionType,
 )
+from post_bot.shared.errors import BusinessRuleError
 
-def _utc_now_naive() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+def _db_now_naive() -> datetime:
+    return datetime.now().replace(tzinfo=None)
 
 class InMemoryUserRepository:
     def __init__(self) -> None:
@@ -144,6 +145,14 @@ class InMemoryUploadRepository:
 
 
 class InMemoryTaskRepository:
+    _LEASE_ACTIVE_STATUSES: tuple[TaskStatus, ...] = (
+        TaskStatus.PREPARING,
+        TaskStatus.RESEARCHING,
+        TaskStatus.GENERATING,
+        TaskStatus.RENDERING,
+        TaskStatus.PUBLISHING,
+    )
+
     def __init__(self) -> None:
         self.tasks: dict[int, Task] = {}
         self.updated_at_by_task_id: dict[int, datetime] = {}
@@ -155,7 +164,7 @@ class InMemoryTaskRepository:
             if task.id <= 0:
                 task = replace(task, id=self._next_id)
             self.tasks[task.id] = task
-            self.updated_at_by_task_id[task.id] = _utc_now_naive()
+            self.updated_at_by_task_id[task.id] = _db_now_naive()
             created.append(task)
             self._next_id = max(self._next_id, task.id + 1)
         return created
@@ -171,13 +180,15 @@ class InMemoryTaskRepository:
                 items.append(task)
         return items
 
-    def list_by_statuses(self, statuses: tuple[TaskStatus, ...]) -> list[Task]:
+    def list_by_statuses(self, statuses: tuple[TaskStatus, ...], *, limit: int | None = None) -> list[Task]:
         items: list[Task] = []
         allowed = set(statuses)
         for task_id in sorted(self.tasks.keys()):
             task = self.tasks[task_id]
             if task.task_status in allowed:
                 items.append(task)
+                if limit is not None and len(items) >= limit:
+                    break
         return items
 
     def list_stale_ids(
@@ -198,6 +209,12 @@ class InMemoryTaskRepository:
             updated_at = self.updated_at_by_task_id.get(task_id)
             if updated_at is None:
                 continue
+            if not task.claimed_by:
+                continue
+            if task.lease_until is None:
+                continue
+            if task.lease_until > threshold_before:
+                continue
             if updated_at <= threshold_before:
                 candidates.append((updated_at, task_id))
 
@@ -206,16 +223,49 @@ class InMemoryTaskRepository:
 
     def claim_next_for_worker(self, worker_id: str) -> Task | None:
         _ = worker_id
-        now = _utc_now_naive()
+        now = _db_now_naive()
 
         for task_id in sorted(self.tasks.keys()):
             task = self.tasks[task_id]
-            if task.task_status == TaskStatus.QUEUED and self._is_due_for_processing(task=task, now=now):
+            if (
+                task.task_status == TaskStatus.CREATED
+                and self._is_due_for_processing(task=task, now=now)
+                and self._is_lease_available(task=task, now=now)
+            ):
                 return task
 
         for task_id in sorted(self.tasks.keys()):
             task = self.tasks[task_id]
-            if task.task_status == TaskStatus.CREATED and self._is_due_for_processing(task=task, now=now):
+            if (
+                task.task_status == TaskStatus.QUEUED
+                and task.retry_count == 0
+                and self._is_due_for_processing(task=task, now=now)
+                and self._is_lease_available(task=task, now=now)
+            ):
+                return task
+
+        for task_id in sorted(self.tasks.keys()):
+            task = self.tasks[task_id]
+            if (
+                task.task_status == TaskStatus.QUEUED
+                and task.retry_count > 0
+                and bool(task.last_error_message)
+                and self._is_due_for_processing(task=task, now=now)
+                and self._is_retry_due(task=task, now=now)
+                and self._is_lease_available(task=task, now=now)
+            ):
+                return task
+
+        for task_id in sorted(self.tasks.keys()):
+            task = self.tasks[task_id]
+            if (
+                task.task_status == TaskStatus.PUBLISHING
+                and task.retry_count > 0
+                and bool(task.last_error_message)
+                and self._is_due_for_processing(task=task, now=now)
+                and self._is_retry_due(task=task, now=now)
+                and self._is_lease_available(task=task, now=now)
+            ):
                 return task
 
         return None
@@ -227,25 +277,90 @@ class InMemoryTaskRepository:
             return True
         return scheduled <= now
 
+    @staticmethod
+    def _is_retry_due(*, task: Task, now: datetime) -> bool:
+        if task.retry_count <= 0:
+            return True
+        if task.next_attempt_at is None:
+            return True
+        return task.next_attempt_at <= now
+
+    @staticmethod
+    def _is_lease_available(*, task: Task, now: datetime) -> bool:
+        if task.lease_until is None:
+            return True
+        return task.lease_until <= now
+
     def set_task_status(self, task_id: int, status: TaskStatus, *, changed_by: str, reason: str | None) -> None:
         _ = (changed_by, reason)
         task = self.tasks[task_id]
-        now = _utc_now_naive()
+        now = _db_now_naive()
         completed_at = task.completed_at
         if is_task_final(status) and completed_at is None:
             completed_at = now
-        self.tasks[task_id] = replace(task, task_status=status, completed_at=completed_at)
+        if status in self._LEASE_ACTIVE_STATUSES:
+            self.tasks[task_id] = replace(task, task_status=status, completed_at=completed_at)
+        else:
+            self.tasks[task_id] = replace(
+                task,
+                task_status=status,
+                claimed_by=None,
+                claimed_at=None,
+                lease_until=None,
+                completed_at=completed_at,
+            )
         self.updated_at_by_task_id[task_id] = now
 
     def set_task_billing_state(self, task_id: int, billing_state: TaskBillingState) -> None:
         task = self.tasks[task_id]
         self.tasks[task_id] = replace(task, billing_state=billing_state)
-        self.updated_at_by_task_id[task_id] = _utc_now_naive()
+        self.updated_at_by_task_id[task_id] = _db_now_naive()
 
-    def set_retry_state(self, task_id: int, *, retry_count: int, last_error_message: str | None) -> None:
+    def set_retry_state(
+        self,
+        task_id: int,
+        *,
+        retry_count: int,
+        last_error_message: str | None,
+        next_attempt_at: datetime | None,
+    ) -> None:
         task = self.tasks[task_id]
-        self.tasks[task_id] = replace(task, retry_count=retry_count, last_error_message=last_error_message)
-        self.updated_at_by_task_id[task_id] = _utc_now_naive()
+        self.tasks[task_id] = replace(
+            task,
+            retry_count=retry_count,
+            last_error_message=last_error_message,
+            next_attempt_at=next_attempt_at,
+        )
+        self.updated_at_by_task_id[task_id] = _db_now_naive()
+
+    def set_task_lease(
+        self,
+        task_id: int,
+        *,
+        claimed_by: str | None,
+        claimed_at: datetime | None,
+        lease_until: datetime | None,
+    ) -> None:
+        task = self.tasks[task_id]
+        self.tasks[task_id] = replace(
+            task,
+            claimed_by=claimed_by,
+            claimed_at=claimed_at,
+            lease_until=lease_until,
+        )
+        self.updated_at_by_task_id[task_id] = _db_now_naive()
+
+    def heartbeat_task_lease(self, task_id: int, *, worker_id: str, lease_until: datetime) -> bool:
+        task = self.tasks.get(task_id)
+        if task is None:
+            return False
+        if task.claimed_by != worker_id:
+            return False
+        if task.task_status not in self._LEASE_ACTIVE_STATUSES:
+            return False
+        self.tasks[task_id] = replace(task, lease_until=lease_until)
+        self.updated_at_by_task_id[task_id] = _db_now_naive()
+        return True
 
 
 class InMemoryBalanceRepository:
@@ -486,12 +601,14 @@ class InMemoryArtifactRepository:
                 items.append(record)
         return items
 
-    def list_non_final(self) -> list[TaskArtifactRecord]:
+    def list_non_final(self, *, limit: int | None = None) -> list[TaskArtifactRecord]:
         items: list[TaskArtifactRecord] = []
         for artifact_id in sorted(self.records.keys()):
             record = self.records[artifact_id]
             if not record.is_final:
                 items.append(record)
+                if limit is not None and len(items) >= limit:
+                    break
         return items
 
     def delete_by_id(self, artifact_id: int) -> None:
@@ -510,7 +627,7 @@ class InMemoryApprovalBatchRepository:
             user_id=user_id,
             batch_status=ApprovalBatchStatus.READY,
             zip_artifact_id=None,
-            created_at=_utc_now_naive(),
+            created_at=_db_now_naive(),
         )
         self.records[self._next_id] = record
         self._next_id += 1
@@ -552,7 +669,7 @@ class InMemoryApprovalBatchRepository:
 
     def set_status(self, batch_id: int, status: ApprovalBatchStatus) -> None:
         record = self.records[batch_id]
-        now = _utc_now_naive()
+        now = _db_now_naive()
         updates = {"batch_status": status}
         if status == ApprovalBatchStatus.USER_NOTIFIED and record.notified_at is None:
             updates["notified_at"] = now
@@ -611,6 +728,14 @@ class InMemoryPublicationRepository:
         publish_mode: str,
         scheduled_for: datetime | None,
     ) -> PublicationRecord:
+        existing_pending = self.find_by_task_and_status(task_id, PublicationStatus.PENDING)
+        if existing_pending is not None:
+            raise BusinessRuleError(
+                code="PUBLICATION_ALREADY_IN_PROGRESS",
+                message="Publication is already in progress for this task.",
+                details={"task_id": task_id, "publication_id": existing_pending.id},
+            )
+
         record = PublicationRecord(
             id=self._next_id,
             task_id=task_id,
@@ -641,12 +766,21 @@ class InMemoryPublicationRepository:
             error_message=None,
         )
 
-    def mark_failed(self, publication_id: int, *, error_message: str) -> None:
+    def mark_failed(
+        self,
+        publication_id: int,
+        *,
+        error_message: str,
+        publisher_payload_json: dict[str, object] | None = None,
+    ) -> None:
         record = self.records[publication_id]
         self.records[publication_id] = replace(
             record,
             publication_status=PublicationStatus.FAILED,
             error_message=error_message,
+            publisher_payload_json=(
+                publisher_payload_json if publisher_payload_json is not None else record.publisher_payload_json
+            ),
         )
 
     def mark_skipped(self, publication_id: int, *, error_message: str | None = None) -> None:
@@ -860,12 +994,14 @@ class FakePublisher:
         channel: str,
         html: str,
         scheduled_for: datetime | None,
+        resume_payload_json: dict[str, object] | None = None,
     ) -> tuple[str | None, dict[str, object] | None]:
         self.calls.append(
             {
                 "channel": channel,
                 "html": html,
                 "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
+                "resume_payload_json": resume_payload_json,
             }
         )
         if self._error is not None:

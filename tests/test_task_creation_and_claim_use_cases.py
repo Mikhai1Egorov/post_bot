@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 import logging
 import sys
 from pathlib import Path
@@ -109,6 +109,9 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         task = uow.tasks.tasks[task_id]
         self.assertEqual(task.task_status, TaskStatus.PREPARING)
         self.assertEqual(task.billing_state, TaskBillingState.CONSUMED)
+        self.assertEqual(task.claimed_by, "w1")
+        self.assertIsNotNone(task.claimed_at)
+        self.assertIsNotNone(task.lease_until)
 
         upload = uow.uploads.uploads[upload_id]
         self.assertEqual(upload.billing_status, UploadBillingStatus.CONSUMED)
@@ -142,7 +145,7 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         create_result = create.execute(TaskCreationCommand(upload_id=upload_id, normalized_rows=rows))
         task_id = create_result.created_task_ids[0]
 
-        now = datetime.now(UTC).replace(tzinfo=None)
+        now = datetime.now().replace(tzinfo=None)
         task = uow.tasks.tasks[task_id]
         uow.tasks.tasks[task_id] = replace(task, scheduled_publish_at=now + timedelta(minutes=5))
 
@@ -205,6 +208,8 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         self.assertIsNotNone(result.task)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.PREPARING)
         self.assertEqual(uow.tasks.tasks[1].billing_state, TaskBillingState.CONSUMED)
+        self.assertEqual(uow.tasks.tasks[1].claimed_by, "w-retry")
+        self.assertIsNotNone(uow.tasks.tasks[1].lease_until)
 
         balance = uow.balances.snapshots[44]
         self.assertEqual(balance.available_articles_count, 4)
@@ -212,6 +217,169 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         self.assertEqual(balance.consumed_articles_total, 1)
 
         self.assertEqual(len(uow.ledger.entries), 0)
+
+    def test_claim_publish_retry_task_stays_in_publishing_without_consume(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=44, original_filename="tasks.xlsx", storage_path="memory://upload")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.uploads.set_billing_status(upload.id, UploadBillingStatus.CONSUMED)
+        uow.uploads.set_reserved_articles_count(upload.id, 0)
+
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=44, available_articles_count=4, reserved_articles_count=0, consumed_articles_total=1)
+        )
+
+        task = Task(
+            id=1,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="AI adoption",
+            custom_title="AI adoption in 2026",
+            keywords_text="ai, automation",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.PUBLISHING,
+            retry_count=1,
+            last_error_message="TELEGRAM_HTTP_ERROR: transport failure",
+        )
+        uow.tasks.create_many([task])
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.claim.publish_retry"))
+        result = claim.execute(ClaimNextTaskCommand(worker_id="w-publish-retry"))
+
+        self.assertIsNotNone(result.task)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.PUBLISHING)
+        self.assertEqual(uow.tasks.tasks[1].billing_state, TaskBillingState.CONSUMED)
+        self.assertEqual(uow.tasks.tasks[1].claimed_by, "w-publish-retry")
+        self.assertIsNotNone(uow.tasks.tasks[1].lease_until)
+        balance = uow.balances.snapshots[44]
+        self.assertEqual(balance.available_articles_count, 4)
+        self.assertEqual(balance.reserved_articles_count, 0)
+        self.assertEqual(balance.consumed_articles_total, 1)
+        self.assertEqual(len(uow.ledger.entries), 0)
+
+    def test_claim_publish_retry_task_waits_for_next_attempt_at(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=44, original_filename="tasks.xlsx", storage_path="memory://upload")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.uploads.set_billing_status(upload.id, UploadBillingStatus.CONSUMED)
+        uow.uploads.set_reserved_articles_count(upload.id, 0)
+
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=44, available_articles_count=4, reserved_articles_count=0, consumed_articles_total=1)
+        )
+
+        now = datetime.now().replace(tzinfo=None)
+        task = Task(
+            id=1,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="AI adoption",
+            custom_title="AI adoption in 2026",
+            keywords_text="ai, automation",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.PUBLISHING,
+            retry_count=1,
+            last_error_message="TELEGRAM_HTTP_ERROR: temporary transport issue",
+            next_attempt_at=now + timedelta(minutes=2),
+        )
+        uow.tasks.create_many([task])
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.claim.publish_retry_wait"))
+        result = claim.execute(ClaimNextTaskCommand(worker_id="w-publish-retry"))
+        self.assertIsNone(result.task)
+
+    def test_claim_prioritizes_fresh_created_over_due_retry(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=44, original_filename="tasks.xlsx", storage_path="memory://upload")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.uploads.set_billing_status(upload.id, UploadBillingStatus.CONSUMED)
+        uow.uploads.set_reserved_articles_count(upload.id, 0)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=44, available_articles_count=4, reserved_articles_count=0, consumed_articles_total=1)
+        )
+
+        now = datetime.now().replace(tzinfo=None)
+        retry_task = Task(
+            id=1,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="Retry publish",
+            custom_title="Retry publish",
+            keywords_text="retry",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.PUBLISHING,
+            retry_count=1,
+            last_error_message="TELEGRAM_HTTP_ERROR: temporary transport issue",
+            next_attempt_at=now - timedelta(seconds=5),
+        )
+        fresh_task = Task(
+            id=2,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="Fresh task",
+            custom_title="Fresh task",
+            keywords_text="fresh",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.CREATED,
+            retry_count=0,
+            last_error_message=None,
+        )
+        uow.tasks.create_many([retry_task, fresh_task])
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.claim.fresh_priority"))
+        result = claim.execute(ClaimNextTaskCommand(worker_id="w-priority"))
+        self.assertIsNotNone(result.task)
+        self.assertEqual(result.task.id, 2)
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.PREPARING)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.PUBLISHING)
 
     def test_claim_next_task_concurrently_no_duplicates(self) -> None:
         uow, _, upload_id, rows = self._prepare_validated_upload()

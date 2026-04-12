@@ -150,6 +150,7 @@ class RunTaskGenerationUseCaseTests(unittest.TestCase):
         task = uow.tasks.tasks[1]
         self.assertEqual(task.task_status, TaskStatus.QUEUED)
         self.assertEqual(task.retry_count, 1)
+        self.assertIsNotNone(task.next_attempt_at)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.PROCESSING)
 
         self.assertEqual(len(uow.generations.records), 1)
@@ -179,6 +180,7 @@ class RunTaskGenerationUseCaseTests(unittest.TestCase):
         self.assertEqual(result.task_status, TaskStatus.FAILED)
         self.assertEqual(result.error_code, "LLM_TIMEOUT")
         self.assertEqual(uow.tasks.tasks[1].retry_count, TASK_MAX_RETRY_ATTEMPTS + 1)
+        self.assertIsNone(uow.tasks.tasks[1].next_attempt_at)
         self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.FAILED)
 
     def test_prompt_template_not_found_fails_without_generation_record(self) -> None:

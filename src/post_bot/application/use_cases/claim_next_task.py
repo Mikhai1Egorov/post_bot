@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from logging import Logger
 
 from post_bot.application.task_transitions import transition_task_status
 from post_bot.domain.billing import ConsumeDecision, ensure_task_can_be_consumed
 from post_bot.domain.models import BalanceSnapshot, LedgerEntry, Task
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
+from post_bot.shared.constants import WORKER_TASK_LEASE_SECONDS
 from post_bot.shared.enums import LedgerEntryType, TaskBillingState, TaskStatus, UploadBillingStatus
 from post_bot.shared.errors import InternalError
 from post_bot.shared.logging import TimedLog, log_event
@@ -24,9 +26,16 @@ class ClaimNextTaskResult:
 class ClaimNextTaskUseCase:
     """Claims next runnable task atomically and consumes reserved billing."""
 
-    def __init__(self, *, uow: UnitOfWork, logger: Logger) -> None:
+    def __init__(
+        self,
+        *,
+        uow: UnitOfWork,
+        logger: Logger,
+        task_lease_seconds: int = WORKER_TASK_LEASE_SECONDS,
+    ) -> None:
         self._uow = uow
         self._logger = logger
+        self._task_lease_seconds = max(1, int(task_lease_seconds))
 
     def execute(self, command: ClaimNextTaskCommand) -> ClaimNextTaskResult:
         timer = TimedLog()
@@ -59,28 +68,31 @@ class ClaimNextTaskUseCase:
                 )
                 claimed = self._uow.tasks.get_by_id_for_update(claimed.id) or claimed
 
-            if claimed.task_status != TaskStatus.QUEUED:
+            if claimed.task_status == TaskStatus.QUEUED:
+                # Move QUEUED -> PREPARING in the claim transaction to prevent double-claim races.
+                transition_task_status(
+                    uow=self._uow,
+                    task_id=claimed.id,
+                    new_status=TaskStatus.PREPARING,
+                    changed_by=command.worker_id,
+                    reason="claimed_by_worker",
+                )
+                claimed = self._uow.tasks.get_by_id_for_update(claimed.id) or claimed
+            elif claimed.task_status != TaskStatus.PUBLISHING:
                 raise InternalError(
                     code="CLAIMED_TASK_STATUS_INVALID",
-                    message="Claimed task must be in CREATED or QUEUED status.",
+                    message="Claimed task must be in CREATED, QUEUED, or PUBLISHING status.",
                     details={"task_id": claimed.id, "task_status": claimed.task_status.value},
                 )
 
-            # Move QUEUED -> PREPARING in the claim transaction to prevent double-claim races.
-            transition_task_status(
-                uow=self._uow,
-                task_id=claimed.id,
-                new_status=TaskStatus.PREPARING,
-                changed_by=command.worker_id,
-                reason="claimed_by_worker",
-            )
+            if claimed.task_status == TaskStatus.PREPARING:
+                consume_decision = ensure_task_can_be_consumed(claimed)
+                if consume_decision == ConsumeDecision.CAN_CONSUME:
+                    self._consume_billing(claimed)
+                    claimed = self._uow.tasks.get_by_id_for_update(claimed.id) or claimed
+
+            self._acquire_task_lease(task_id=claimed.id, worker_id=command.worker_id)
             claimed = self._uow.tasks.get_by_id_for_update(claimed.id) or claimed
-
-            consume_decision = ensure_task_can_be_consumed(claimed)
-            if consume_decision == ConsumeDecision.CAN_CONSUME:
-                self._consume_billing(claimed)
-                claimed = self._uow.tasks.get_by_id_for_update(claimed.id) or claimed
-
             self._uow.commit()
 
         log_event(
@@ -95,6 +107,15 @@ class ClaimNextTaskUseCase:
             extra={"worker_id": command.worker_id, "task_id": claimed.id, "upload_id": claimed.upload_id},
         )
         return ClaimNextTaskResult(task=claimed)
+
+    def _acquire_task_lease(self, *, task_id: int, worker_id: str) -> None:
+        now = datetime.now().replace(tzinfo=None)
+        self._uow.tasks.set_task_lease(
+            task_id,
+            claimed_by=worker_id,
+            claimed_at=now,
+            lease_until=now + timedelta(seconds=self._task_lease_seconds),
+        )
 
     def _consume_billing(self, task: Task) -> None:
         balance = self._uow.balances.get_user_balance_for_update(task.user_id) or BalanceSnapshot(

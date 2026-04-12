@@ -13,12 +13,14 @@ from post_bot.shared.enums import ApprovalBatchStatus, PublicationStatus, TaskSt
 from post_bot.shared.errors import AppError, BusinessRuleError, InternalError
 from post_bot.shared.logging import TimedLog, log_event
 
+
 @dataclass(slots=True, frozen=True)
 class DownloadApprovalBatchCommand:
     batch_id: int
     user_id: int
     changed_by: str = "user"
     action_payload_json: dict[str, Any] | None = None
+
 
 @dataclass(slots=True, frozen=True)
 class DownloadApprovalBatchResult:
@@ -28,6 +30,7 @@ class DownloadApprovalBatchResult:
     zip_storage_path: str | None
     zip_file_name: str | None
     error_code: str | None
+
 
 class DownloadApprovalBatchUseCase:
     """Marks approval tasks as downloaded and returns ZIP archive pointer."""
@@ -47,6 +50,16 @@ class DownloadApprovalBatchUseCase:
                         code="APPROVAL_BATCH_NOT_FOUND",
                         message="Approval batch does not exist.",
                         details={"batch_id": command.batch_id},
+                    )
+                if batch.user_id != command.user_id:
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_FORBIDDEN",
+                        message="Approval batch belongs to another user.",
+                        details={
+                            "batch_id": command.batch_id,
+                            "user_id": command.user_id,
+                            "owner_user_id": batch.user_id,
+                        },
                     )
                 if batch.batch_status == ApprovalBatchStatus.PUBLISHED:
                     raise BusinessRuleError(
@@ -87,6 +100,17 @@ class DownloadApprovalBatchUseCase:
                         code="APPROVAL_BATCH_ITEMS_EMPTY",
                         message="Approval batch has no linked tasks.",
                         details={"batch_id": command.batch_id},
+                    )
+                if self._has_new_ready_tasks_outside_batch(batch.upload_id, batch_task_ids=set(task_ids)):
+                    self._uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.EXPIRED)
+                    self._uow.commit()
+                    raise BusinessRuleError(
+                        code="APPROVAL_BATCH_EXPIRED",
+                        message="Approval batch is stale and has been expired.",
+                        details={
+                            "batch_id": command.batch_id,
+                            "upload_id": batch.upload_id,
+                        },
                     )
 
                 self._uow.user_actions.append_action(
@@ -177,3 +201,10 @@ class DownloadApprovalBatchUseCase:
                 zip_file_name=None,
                 error_code=error.code,
             )
+
+    def _has_new_ready_tasks_outside_batch(self, upload_id: int, *, batch_task_ids: set[int]) -> bool:
+        tasks = self._uow.tasks.list_by_upload(upload_id)
+        current_ready_task_ids = {
+            task.id for task in tasks if task.task_status == TaskStatus.READY_FOR_APPROVAL
+        }
+        return len(current_ready_task_ids - batch_task_ids) > 0

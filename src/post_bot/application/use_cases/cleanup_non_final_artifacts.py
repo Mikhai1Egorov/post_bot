@@ -7,11 +7,13 @@ from logging import Logger
 
 from post_bot.application.ports import ArtifactStoragePort
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
+from post_bot.shared.errors import BusinessRuleError
 from post_bot.shared.logging import TimedLog, log_event
 
 @dataclass(slots=True, frozen=True)
 class CleanupNonFinalArtifactsCommand:
     dry_run: bool = False
+    batch_limit: int = 200
 
 @dataclass(slots=True, frozen=True)
 class CleanupNonFinalArtifactsResult:
@@ -28,10 +30,17 @@ class CleanupNonFinalArtifactsUseCase:
         self._logger = logger
 
     def execute(self, command: CleanupNonFinalArtifactsCommand) -> CleanupNonFinalArtifactsResult:
+        if command.batch_limit < 1:
+            raise BusinessRuleError(
+                code="CLEANUP_BATCH_LIMIT_INVALID",
+                message="batch_limit must be >= 1.",
+                details={"batch_limit": command.batch_limit},
+            )
+
         timer = TimedLog()
 
         with self._uow:
-            candidates = self._uow.artifacts.list_non_final()
+            candidates = self._uow.artifacts.list_non_final(limit=command.batch_limit)
             if command.dry_run:
                 self._uow.commit()
                 return CleanupNonFinalArtifactsResult(

@@ -13,12 +13,14 @@ import logging
 from pathlib import Path
 from typing import cast
 
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsUseCase
 from post_bot.application.use_cases.get_user_context import GetUserContextUseCase
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase
 from post_bot.application.use_cases.mark_approval_batch_notified import MarkApprovalBatchNotifiedUseCase
 from post_bot.infrastructure.runtime.bot_wiring import build_default_bot_wiring
 from post_bot.infrastructure.runtime.path_resolution import resolve_project_root
 from post_bot.infrastructure.runtime.startup_checks import ensure_runtime_dependencies
+from post_bot.infrastructure.runtime.update_checkpoint import FileTelegramUpdateCheckpoint
 from post_bot.infrastructure.runtime.telegram_runtime import (
     TelegramGatewayPort,
     TelegramPollingRuntime,
@@ -61,11 +63,14 @@ def main() -> int:
             config=config,
             require_db_schema_compatibility=True,
         )
+        runtime_data_dir = Path(args.data_dir).resolve() if args.data_dir else project_root / ".runtime_data"
+        update_checkpoint = FileTelegramUpdateCheckpoint(runtime_data_dir / "telegram_update_offset.checkpoint")
+        offset = args.offset if args.offset is not None else update_checkpoint.load()
 
         bot_wiring = build_default_bot_wiring(
             config=config,
             project_root=project_root,
-            data_dir=Path(args.data_dir).resolve() if args.data_dir else None,
+            data_dir=runtime_data_dir,
             logger=logger.getChild("bot_wiring"),
         )
 
@@ -77,6 +82,10 @@ def main() -> int:
             ),
         )
 
+        get_available_posts = GetAvailablePostsUseCase(
+            uow=bot_wiring.uow,
+            logger=logger.getChild("get_available_posts"),
+        )
         get_user_context = GetUserContextUseCase(
             uow=bot_wiring.uow,
             logger=logger.getChild("get_user_context"),
@@ -93,10 +102,12 @@ def main() -> int:
         runtime = TelegramPollingRuntime(
             gateway=gateway,
             bot_wiring=bot_wiring,
+            get_available_posts=get_available_posts,
             get_user_context=get_user_context,
             list_pending_approval_notifications=list_pending_approval_notifications,
             mark_approval_batch_notified=mark_approval_batch_notified,
             logger=logger,
+            update_checkpoint=update_checkpoint,
         )
 
         result = runtime.run(
@@ -105,7 +116,7 @@ def main() -> int:
                 max_failed_cycles=args.max_failed_cycles,
                 poll_timeout_seconds=config.telegram_poll_timeout_seconds,
                 idle_sleep_seconds=args.idle_sleep,
-                offset=args.offset,
+                offset=offset,
             )
         )
 

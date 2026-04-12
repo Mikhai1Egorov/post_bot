@@ -97,6 +97,24 @@ Paragraph two.
         with self.assertRaises(ValidationError):
             PostProcessingModule().render(task=self._task(), raw_output_text="   \n   ")
 
+    def test_render_removes_service_placeholder_and_metadata_lines(self) -> None:
+        raw = """
+# AI Trends in 2026
+These trends highlight the growing impact of artificial intelligence on innovation and productivity in 2026, marking a pivotal year for the evolution of AI technologies.
+[Image placeholder: Illustration related to AI trends in 2026]
+For more insights on emerging AI technologies and their implications, visit the full report at TechCrunch.
+## Main updates
+AI keeps evolving quickly.
+""".strip()
+        rendered = PostProcessingModule().render(task=self._task(), raw_output_text=raw)
+
+        self.assertNotIn("These trends highlight the growing impact of artificial intelligence", rendered.body_html)
+        self.assertNotIn("Image placeholder", rendered.body_html)
+        self.assertNotIn("For more insights", rendered.body_html)
+        self.assertIn("Main updates", rendered.body_html)
+        self.assertIn("AI keeps evolving quickly.", rendered.body_html)
+        self.assertNotIn("Image placeholder", rendered.preview_text)
+
 
 if __name__ == "__main__":
     unittest.main()

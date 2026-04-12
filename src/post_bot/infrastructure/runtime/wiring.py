@@ -17,6 +17,7 @@ from post_bot.application.ports import (
 from post_bot.application.use_cases.claim_next_task import ClaimNextTaskUseCase
 from post_bot.application.use_cases.cleanup_non_final_artifacts import CleanupNonFinalArtifactsUseCase
 from post_bot.application.use_cases.execute_claimed_task import ExecuteClaimedTaskUseCase
+from post_bot.application.use_cases.heartbeat_task_lease import HeartbeatTaskLeaseUseCase
 from post_bot.application.use_cases.expire_approval_batches import ExpireApprovalBatchesUseCase
 from post_bot.application.use_cases.publish_task import PublishTaskUseCase
 from post_bot.application.use_cases.recover_stale_tasks import RecoverStaleTasksUseCase
@@ -199,11 +200,16 @@ def build_worker_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> Wo
         publisher=wiring.publisher,
         logger=logger.getChild("publish"),
     )
+    heartbeat_lease = HeartbeatTaskLeaseUseCase(
+        uow=wiring.uow,
+        logger=logger.getChild("lease_heartbeat"),
+    )
     execute = ExecuteClaimedTaskUseCase(
         run_generation=generation,
         run_rendering=rendering,
         publish_task=publish,
         logger=logger.getChild("execute"),
+        heartbeat_task_lease=heartbeat_lease,
     )
     claim = ClaimNextTaskUseCase(uow=wiring.uow, logger=logger.getChild("claim"))
     recover_stale = RecoverStaleTasksUseCase(uow=wiring.uow, logger=logger.getChild("recover_stale_tasks"))

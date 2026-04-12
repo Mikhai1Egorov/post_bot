@@ -42,6 +42,7 @@ class RunMaintenanceCycleCommand:
     expire_reason_code: str = "APPROVAL_BATCH_EXPIRED"
     cleanup_non_final_artifacts: bool = True
     cleanup_dry_run: bool = False
+    cleanup_batch_limit: int = 200
     changed_by: str = "system_maintenance"
     max_stage_retry_attempts: int = 2
 
@@ -87,6 +88,12 @@ class RunMaintenanceCycleUseCase:
                 code="MAINTENANCE_STAGE_RETRY_ATTEMPTS_INVALID",
                 message="max_stage_retry_attempts must be >= 1.",
                 details={"max_stage_retry_attempts": command.max_stage_retry_attempts},
+            )
+        if command.cleanup_batch_limit < 1:
+            raise BusinessRuleError(
+                code="MAINTENANCE_CLEANUP_BATCH_LIMIT_INVALID",
+                message="cleanup_batch_limit must be >= 1.",
+                details={"cleanup_batch_limit": command.cleanup_batch_limit},
             )
 
         timer = TimedLog()
@@ -251,7 +258,10 @@ class RunMaintenanceCycleUseCase:
             ok, cleanup = execute_stage(
                 "cleanup_non_final_artifacts",
                 lambda: self._cleanup_non_final_artifacts.execute(
-                    CleanupNonFinalArtifactsCommand(dry_run=command.cleanup_dry_run)
+                    CleanupNonFinalArtifactsCommand(
+                        dry_run=command.cleanup_dry_run,
+                        batch_limit=command.cleanup_batch_limit,
+                    )
                 ),
             )
             if ok and cleanup is not None:

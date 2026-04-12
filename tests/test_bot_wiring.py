@@ -20,6 +20,7 @@ from post_bot.infrastructure.runtime.bot_wiring import (  # noqa: E402
 from post_bot.infrastructure.testing.in_memory import FakeExcelTaskParser, InMemoryFileStorage, InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
 
+
 class FakeInstructionBundleProvider:
     def __init__(self) -> None:
         self.bundle = InstructionBundle(
@@ -129,7 +130,6 @@ class BotWiringTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-
     def test_default_instruction_bundle_provider_uses_localized_readmes_from_folder(self) -> None:
         root = self._make_temp_root(".tmp_default_instruction_provider_localized")
         try:
@@ -161,6 +161,29 @@ class BotWiringTests(unittest.TestCase):
                         self.assertIn("‫readme-ar‬", decoded)
                     else:
                         self.assertEqual(bundle.readme_bytes, f"readme-{language.value}".encode("utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_default_instruction_bundle_provider_prefers_docs_layout(self) -> None:
+        root = self._make_temp_root(".tmp_default_instruction_provider_docs")
+        try:
+            docs = root / "docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            (docs / "NEO_TEMPLATE.xlsx").write_bytes(b"template-docs")
+            (docs / "README_PIPELINE.txt").write_text("readme-docs", encoding="utf-8")
+
+            provider = build_default_instruction_bundle_provider(project_root=root)
+
+            bundle_en = provider.load_bundle(interface_language=InterfaceLanguage.EN)
+            self.assertEqual(bundle_en.template_file_name, "NEO_TEMPLATE.xlsx")
+            self.assertEqual(bundle_en.template_bytes, b"template-docs")
+            self.assertEqual(bundle_en.readme_file_name, "README_PIPELINE.txt")
+            self.assertEqual(bundle_en.readme_bytes, b"readme-docs")
+
+            bundle_ru = provider.load_bundle(interface_language=InterfaceLanguage.RU)
+            self.assertEqual(bundle_ru.template_bytes, b"template-docs")
+            self.assertEqual(bundle_ru.readme_file_name, "README_PIPELINE.txt")
+            self.assertEqual(bundle_ru.readme_bytes, b"readme-docs")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
