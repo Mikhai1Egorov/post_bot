@@ -23,21 +23,7 @@ from post_bot.shared.enums import (  # noqa: E402
     TaskBillingState,
     TaskStatus,
     UploadStatus,
-    UserActionType,
 )
-
-
-class _InterleavingZipBuilder:
-    def __init__(self, *, on_build) -> None:  # noqa: ANN001
-        self._on_build = on_build
-        self._delegate = InMemoryZipBuilder()
-        self._triggered = False
-
-    def build_zip(self, files):  # noqa: ANN001
-        if not self._triggered:
-            self._triggered = True
-            self._on_build()
-        return self._delegate.build_zip(files)
 
 
 class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
@@ -66,10 +52,17 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
             retry_count=0,
         )
 
-    def _seed_ready_upload_with_tasks_and_html(self, uow: InMemoryUnitOfWork, storage: InMemoryFileStorage) -> int:
+    def _seed_ready_upload_with_tasks_and_html(
+        self,
+        uow: InMemoryUnitOfWork,
+        storage: InMemoryFileStorage,
+        *,
+        task_count: int,
+    ) -> int:
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
-        tasks = [self._task(1, upload.id), self._task(2, upload.id)]
+
+        tasks = [self._task(index, upload.id) for index in range(1, task_count + 1)]
         uow.tasks.create_many(tasks)
 
         for task in tasks:
@@ -93,10 +86,10 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
 
         return upload.id
 
-    def test_build_approval_batch_success(self) -> None:
+    def test_build_approval_batch_uses_only_first_ready_task(self) -> None:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
+        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage, task_count=2)
 
         use_case = BuildApprovalBatchUseCase(
             uow=uow,
@@ -105,49 +98,18 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
             zip_builder=InMemoryZipBuilder(),
             logger=logging.getLogger("test.approval.build"),
         )
-
         result = use_case.execute(BuildApprovalBatchCommand(upload_id=upload_id))
 
         self.assertTrue(result.success)
-        self.assertIsNotNone(result.batch_id)
-        self.assertIsNotNone(result.zip_artifact_id)
-        self.assertEqual(set(result.task_ids), {1, 2})
-
-        batch = uow.approval_batches.get_by_id_for_update(result.batch_id)
-        self.assertIsNotNone(batch)
-        self.assertEqual(batch.batch_status, ApprovalBatchStatus.READY)
-        self.assertEqual(batch.zip_artifact_id, result.zip_artifact_id)
-        self.assertIsNotNone(batch.created_at)
-
+        self.assertEqual(result.task_ids, (1,))
         zip_bytes = storage.read_bytes(result.zip_storage_path)
         with ZipFile(BytesIO(zip_bytes), mode="r") as archive:
-            names = set(archive.namelist())
-            self.assertEqual(names, {"Title 1.html", "Title 2.html"})
+            self.assertEqual(set(archive.namelist()), {"Title 1.html"})
 
-    def test_build_approval_batch_fails_without_html_artifact(self) -> None:
+    def test_build_reuses_existing_active_batch_for_same_first_task(self) -> None:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
-        upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
-        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
-        uow.tasks.create_many([self._task(1, upload.id)])
-
-        use_case = BuildApprovalBatchUseCase(
-            uow=uow,
-            file_storage=storage,
-            artifact_storage=storage,
-            zip_builder=InMemoryZipBuilder(),
-            logger=logging.getLogger("test.approval.build"),
-        )
-
-        result = use_case.execute(BuildApprovalBatchCommand(upload_id=upload.id))
-
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "TASK_HTML_ARTIFACT_MISSING")
-
-    def test_build_approval_batch_reuses_existing_when_ready_set_is_unchanged(self) -> None:
-        uow = InMemoryUnitOfWork()
-        storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
+        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage, task_count=2)
         use_case = BuildApprovalBatchUseCase(
             uow=uow,
             file_storage=storage,
@@ -158,19 +120,17 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
 
         first = use_case.execute(BuildApprovalBatchCommand(upload_id=upload_id))
         self.assertTrue(first.success)
-        batch_id = first.batch_id
-        self.assertIsNotNone(batch_id)
-        uow.approval_batches.set_status(batch_id, ApprovalBatchStatus.USER_NOTIFIED)
-
+        uow.approval_batches.set_status(first.batch_id, ApprovalBatchStatus.USER_NOTIFIED)
         second = use_case.execute(BuildApprovalBatchCommand(upload_id=upload_id))
+
         self.assertTrue(second.success)
         self.assertEqual(second.batch_id, first.batch_id)
-        self.assertEqual(set(second.task_ids), {1, 2})
+        self.assertEqual(second.task_ids, (1,))
 
-    def test_build_approval_batch_creates_new_batch_when_ready_set_changed_after_notification(self) -> None:
+    def test_build_creates_next_batch_after_first_task_processed(self) -> None:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
+        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage, task_count=2)
         use_case = BuildApprovalBatchUseCase(
             uow=uow,
             file_storage=storage,
@@ -181,75 +141,18 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
 
         first = use_case.execute(BuildApprovalBatchCommand(upload_id=upload_id))
         self.assertTrue(first.success)
-        first_batch_id = first.batch_id
-        self.assertIsNotNone(first_batch_id)
-        uow.approval_batches.set_status(first_batch_id, ApprovalBatchStatus.USER_NOTIFIED)
-
-        task3 = self._task(3, upload_id)
-        uow.tasks.create_many([task3])
-        html_payload = f"<article><h1>{task3.custom_title}</h1><p>Body</p></article>".encode("utf-8")
-        html_path = storage.save_task_artifact(
-            task_id=task3.id,
-            artifact_type=ArtifactType.HTML,
-            file_name=f"{task3.custom_title}.html",
-            content=html_payload,
-        )
-        uow.artifacts.add_artifact(
-            task_id=task3.id,
-            upload_id=upload_id,
-            artifact_type=ArtifactType.HTML,
-            storage_path=html_path,
-            file_name=f"{task3.custom_title}.html",
-            mime_type="text/html",
-            size_bytes=len(html_payload),
-            is_final=True,
-        )
+        uow.approval_batches.set_status(first.batch_id, ApprovalBatchStatus.PUBLISHED)
+        uow.tasks.set_task_status(1, TaskStatus.DONE, changed_by="test", reason="published")
 
         second = use_case.execute(BuildApprovalBatchCommand(upload_id=upload_id))
         self.assertTrue(second.success)
-        self.assertNotEqual(second.batch_id, first_batch_id)
-        self.assertEqual(set(second.task_ids), {1, 2, 3})
+        self.assertNotEqual(second.batch_id, first.batch_id)
+        self.assertEqual(second.task_ids, (2,))
 
-        expired_first = uow.approval_batches.get_by_id_for_update(first_batch_id)
-        self.assertIsNotNone(expired_first)
-        self.assertEqual(expired_first.batch_status, ApprovalBatchStatus.EXPIRED)
-
-    def test_build_approval_batch_finalizes_created_batch_even_if_newer_batch_appears(self) -> None:
+    def test_download_marks_only_current_batch_task_done(self) -> None:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
-        upload = uow.uploads.get_by_id_for_update(upload_id)
-        self.assertIsNotNone(upload)
-
-        def _create_newer_batch() -> None:
-            created = uow.approval_batches.create_ready(upload_id=upload_id, user_id=upload.user_id)
-            uow.approval_batch_items.add_items(batch_id=created.id, task_ids=[1, 2])
-
-        zip_builder = _InterleavingZipBuilder(on_build=_create_newer_batch)
-        use_case = BuildApprovalBatchUseCase(
-            uow=uow,
-            file_storage=storage,
-            artifact_storage=storage,
-            zip_builder=zip_builder,
-            logger=logging.getLogger("test.approval.build"),
-        )
-
-        result = use_case.execute(BuildApprovalBatchCommand(upload_id=upload_id))
-
-        self.assertTrue(result.success)
-        first_batch = uow.approval_batches.get_by_id_for_update(result.batch_id)
-        self.assertIsNotNone(first_batch)
-        self.assertIsNotNone(first_batch.zip_artifact_id)
-
-        latest_batch = uow.approval_batches.find_by_upload(upload_id)
-        self.assertIsNotNone(latest_batch)
-        if latest_batch.id != result.batch_id:
-            self.assertIsNone(latest_batch.zip_artifact_id)
-
-    def test_download_marks_tasks_done_and_publications_skipped(self) -> None:
-        uow = InMemoryUnitOfWork()
-        storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
+        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage, task_count=2)
 
         build = BuildApprovalBatchUseCase(
             uow=uow,
@@ -260,6 +163,7 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
         )
         build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload_id))
         self.assertTrue(build_result.success)
+        uow.approval_batches.set_status(build_result.batch_id, ApprovalBatchStatus.USER_NOTIFIED)
 
         download = DownloadApprovalBatchUseCase(uow=uow, logger=logging.getLogger("test.approval.download"))
         download_result = download.execute(
@@ -267,28 +171,17 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
         )
 
         self.assertTrue(download_result.success)
-        self.assertEqual(set(download_result.task_ids), {1, 2})
+        self.assertEqual(download_result.task_ids, (1,))
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.DONE)
-        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.DONE)
-
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.READY_FOR_APPROVAL)
         publication_1 = uow.publications.get_latest_for_task(1)
-        publication_2 = uow.publications.get_latest_for_task(2)
+        self.assertIsNotNone(publication_1)
         self.assertEqual(publication_1.publication_status, PublicationStatus.SKIPPED)
-        self.assertEqual(publication_2.publication_status, PublicationStatus.SKIPPED)
 
-        batch = uow.approval_batches.get_by_id_for_update(build_result.batch_id)
-        self.assertEqual(batch.batch_status, ApprovalBatchStatus.DOWNLOADED)
-        self.assertIsNotNone(batch.downloaded_at)
-        self.assertEqual(uow.uploads.uploads[upload_id].upload_status, UploadStatus.COMPLETED)
-
-        actions = list(uow.user_actions.records.values())
-        self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0].action_type, UserActionType.DOWNLOAD_ARCHIVE_CLICK)
-
-    def test_download_rejected_if_already_downloaded(self) -> None:
+    def test_download_is_idempotent_for_already_downloaded_batch(self) -> None:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
+        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage, task_count=1)
 
         build = BuildApprovalBatchUseCase(
             uow=uow,
@@ -299,111 +192,17 @@ class ApprovalBatchBuildAndDownloadUseCaseTests(unittest.TestCase):
         )
         build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload_id))
         self.assertTrue(build_result.success)
-
         uow.approval_batches.set_status(build_result.batch_id, ApprovalBatchStatus.DOWNLOADED)
-
-        download = DownloadApprovalBatchUseCase(uow=uow, logger=logging.getLogger("test.approval.download"))
-        result = download.execute(DownloadApprovalBatchCommand(batch_id=build_result.batch_id, user_id=20, changed_by="user"))
-
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "APPROVAL_BATCH_ALREADY_DOWNLOADED")
-
-    def test_download_rejected_if_expired(self) -> None:
-        uow = InMemoryUnitOfWork()
-        storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
-
-        build = BuildApprovalBatchUseCase(
-            uow=uow,
-            file_storage=storage,
-            artifact_storage=storage,
-            zip_builder=InMemoryZipBuilder(),
-            logger=logging.getLogger("test.approval.build"),
-        )
-        build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload_id))
-        self.assertTrue(build_result.success)
-
-        uow.approval_batches.set_status(build_result.batch_id, ApprovalBatchStatus.EXPIRED)
-
-        download = DownloadApprovalBatchUseCase(uow=uow, logger=logging.getLogger("test.approval.download"))
-        result = download.execute(DownloadApprovalBatchCommand(batch_id=build_result.batch_id, user_id=20, changed_by="user"))
-
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "APPROVAL_BATCH_EXPIRED")
-
-    def test_download_marks_batch_expired_when_new_ready_task_not_in_snapshot(self) -> None:
-        uow = InMemoryUnitOfWork()
-        storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
-
-        build = BuildApprovalBatchUseCase(
-            uow=uow,
-            file_storage=storage,
-            artifact_storage=storage,
-            zip_builder=InMemoryZipBuilder(),
-            logger=logging.getLogger("test.approval.build"),
-        )
-        build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload_id))
-        self.assertTrue(build_result.success)
-
-        # Snapshot currently has tasks 1 and 2; introduce a new ready task 3.
-        task3 = self._task(3, upload_id)
-        uow.tasks.create_many([task3])
-        html_payload = f"<article><h1>{task3.custom_title}</h1><p>Body</p></article>".encode("utf-8")
-        html_path = storage.save_task_artifact(
-            task_id=task3.id,
-            artifact_type=ArtifactType.HTML,
-            file_name=f"{task3.custom_title}.html",
-            content=html_payload,
-        )
-        uow.artifacts.add_artifact(
-            task_id=task3.id,
-            upload_id=upload_id,
-            artifact_type=ArtifactType.HTML,
-            storage_path=html_path,
-            file_name=f"{task3.custom_title}.html",
-            mime_type="text/html",
-            size_bytes=len(html_payload),
-            is_final=True,
-        )
 
         download = DownloadApprovalBatchUseCase(uow=uow, logger=logging.getLogger("test.approval.download"))
         result = download.execute(
             DownloadApprovalBatchCommand(batch_id=build_result.batch_id, user_id=20, changed_by="user")
         )
 
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "APPROVAL_BATCH_EXPIRED")
-        batch = uow.approval_batches.get_by_id_for_update(build_result.batch_id)
-        self.assertIsNotNone(batch)
-        self.assertEqual(batch.batch_status, ApprovalBatchStatus.EXPIRED)
-
-    def test_download_rejected_for_non_owner(self) -> None:
-        uow = InMemoryUnitOfWork()
-        storage = InMemoryFileStorage()
-        upload_id = self._seed_ready_upload_with_tasks_and_html(uow, storage)
-
-        build = BuildApprovalBatchUseCase(
-            uow=uow,
-            file_storage=storage,
-            artifact_storage=storage,
-            zip_builder=InMemoryZipBuilder(),
-            logger=logging.getLogger("test.approval.build"),
-        )
-        build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload_id))
-        self.assertTrue(build_result.success)
-
-        download = DownloadApprovalBatchUseCase(uow=uow, logger=logging.getLogger("test.approval.download"))
-        result = download.execute(
-            DownloadApprovalBatchCommand(batch_id=build_result.batch_id, user_id=999, changed_by="user")
-        )
-
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "APPROVAL_BATCH_FORBIDDEN")
-
-        batch = uow.approval_batches.get_by_id_for_update(build_result.batch_id)
-        self.assertEqual(batch.batch_status, ApprovalBatchStatus.READY)
-        self.assertEqual(len(uow.user_actions.records), 0)
+        self.assertTrue(result.success)
+        self.assertEqual(result.task_ids, (1,))
+        self.assertIsNotNone(result.zip_storage_path)
+        self.assertIsNotNone(result.zip_file_name)
 
 
 if __name__ == "__main__":

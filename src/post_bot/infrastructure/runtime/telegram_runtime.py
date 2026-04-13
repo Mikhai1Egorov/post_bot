@@ -4,16 +4,26 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
+import math
 import time
 from logging import Logger
 from typing import Any, Protocol
 
-from post_bot.application.use_cases.get_available_posts import GetAvailablePostsCommand, GetAvailablePostsUseCase
+from post_bot.application.use_cases.archive_approval_inbox_timeout import (
+    ArchiveApprovalInboxTimeoutCommand,
+    ArchiveApprovalInboxTimeoutUseCase,
+)
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsUseCase
 from post_bot.application.use_cases.get_user_context import GetUserContextCommand, GetUserContextUseCase
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase
 from post_bot.application.use_cases.mark_approval_batch_notified import (
     MarkApprovalBatchNotifiedCommand,
     MarkApprovalBatchNotifiedUseCase,
+)
+from post_bot.application.use_cases.select_expirable_approval_batches import (
+    SelectExpirableApprovalBatchesCommand,
+    SelectExpirableApprovalBatchesUseCase,
 )
 from post_bot.bot.handlers.approval_action_command import HandleApprovalActionCommand
 from post_bot.bot.handlers.approval_batch_command import HandleBuildApprovalBatchCommand
@@ -22,7 +32,7 @@ from post_bot.bot.handlers.language_selection import HandleLanguageSelectionComm
 from post_bot.bot.handlers.telegram_upload_command import HandleTelegramUploadCommand
 from post_bot.infrastructure.runtime.anti_spam import CallbackDebounceCache, FixedWindowRateLimiter
 from post_bot.infrastructure.runtime.bot_wiring import BotWiring
-from post_bot.shared.enums import InterfaceLanguage
+from post_bot.shared.enums import ApprovalBatchStatus, InterfaceLanguage
 from post_bot.shared.errors import AppError, BusinessRuleError, ValidationError
 from post_bot.shared.localization import get_message, parse_interface_language
 from post_bot.shared.logging import TimedLog, log_event
@@ -42,6 +52,7 @@ THROTTLE_RULES: dict[str, tuple[int, float, str | None]] = {
 CALLBACK_DEBOUNCE_TTL_SECONDS = 2.0
 DEFAULT_APPROVAL_DISPATCH_INTERVAL_SECONDS = 5.0
 DEFAULT_APPROVAL_DISPATCH_BATCH_LIMIT = 20
+DEFAULT_APPROVAL_SESSION_TIMEOUT_MINUTES = 10
 DEFAULT_MAX_UPLOAD_SIZE_BYTES = 8 * 1024 * 1024
 ALLOWED_UPLOAD_EXTENSIONS = {".xlsx"}
 ALLOWED_UPLOAD_MIME_TYPES = {
@@ -89,6 +100,7 @@ class TelegramRuntimeCommand:
     offset: int | None = None
     approval_dispatch_interval_seconds: float = DEFAULT_APPROVAL_DISPATCH_INTERVAL_SECONDS
     approval_dispatch_batch_limit: int = DEFAULT_APPROVAL_DISPATCH_BATCH_LIMIT
+    approval_session_timeout_minutes: int = DEFAULT_APPROVAL_SESSION_TIMEOUT_MINUTES
 
 
 @dataclass(slots=True, frozen=True)
@@ -113,9 +125,12 @@ class TelegramPollingRuntime:
         get_user_context: GetUserContextUseCase,
         list_pending_approval_notifications: ListPendingApprovalNotificationsUseCase,
         mark_approval_batch_notified: MarkApprovalBatchNotifiedUseCase,
+        select_expirable_approval_batches: SelectExpirableApprovalBatchesUseCase,
+        archive_approval_inbox_timeout: ArchiveApprovalInboxTimeoutUseCase,
         logger: Logger,
         update_checkpoint: TelegramUpdateCheckpointPort | None = None,
         now_provider: Callable[[], float] | None = None,
+        utcnow_provider: Callable[[], datetime] | None = None,
         rate_limiter: FixedWindowRateLimiter | None = None,
         callback_debounce_cache: CallbackDebounceCache | None = None,
         max_upload_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_BYTES,
@@ -126,9 +141,12 @@ class TelegramPollingRuntime:
         self._get_user_context = get_user_context
         self._list_pending_approval_notifications = list_pending_approval_notifications
         self._mark_approval_batch_notified = mark_approval_batch_notified
+        self._select_expirable_approval_batches = select_expirable_approval_batches
+        self._archive_approval_inbox_timeout = archive_approval_inbox_timeout
         self._logger = logger
         self._update_checkpoint = update_checkpoint
         self._now_provider = now_provider or time.monotonic
+        self._utcnow_provider = utcnow_provider or (lambda: datetime.now().replace(tzinfo=None))
         self._rate_limiter = rate_limiter or FixedWindowRateLimiter(now_provider=self._now_provider)
         self._callback_debounce = callback_debounce_cache or CallbackDebounceCache(
             now_provider=self._now_provider,
@@ -173,6 +191,12 @@ class TelegramPollingRuntime:
                 message="approval_dispatch_batch_limit must be >= 1.",
                 details={"approval_dispatch_batch_limit": command.approval_dispatch_batch_limit},
             )
+        if command.approval_session_timeout_minutes < 1:
+            raise BusinessRuleError(
+                code="TELEGRAM_APPROVAL_SESSION_TIMEOUT_INVALID",
+                message="approval_session_timeout_minutes must be >= 1.",
+                details={"approval_session_timeout_minutes": command.approval_session_timeout_minutes},
+            )
 
         offset = command.offset
         cycles_executed = 0
@@ -188,9 +212,13 @@ class TelegramPollingRuntime:
 
             cycles_executed += 1
             cycle_failed = False
+            effective_poll_timeout_seconds = command.poll_timeout_seconds
+            if command.approval_dispatch_interval_seconds > 0:
+                dispatch_timeout_ceiling = max(1, int(math.ceil(command.approval_dispatch_interval_seconds)))
+                effective_poll_timeout_seconds = min(effective_poll_timeout_seconds, dispatch_timeout_ceiling)
 
             try:
-                updates = self._gateway.get_updates(offset=offset, timeout_seconds=command.poll_timeout_seconds)
+                updates = self._gateway.get_updates(offset=offset, timeout_seconds=effective_poll_timeout_seconds)
             except AppError as error:
                 updates = []
                 if error.code == "TELEGRAM_TIMEOUT":
@@ -275,6 +303,10 @@ class TelegramPollingRuntime:
             now_value = self._now_provider()
             if now_value - last_approval_dispatch_at >= command.approval_dispatch_interval_seconds:
                 try:
+                    self._process_expired_approval_sessions(
+                        timeout_minutes=command.approval_session_timeout_minutes,
+                        limit=command.approval_dispatch_batch_limit,
+                    )
                     self._dispatch_pending_approval_notifications(limit=command.approval_dispatch_batch_limit)
                 except AppError as error:
                     cycle_failed = True
@@ -591,6 +623,8 @@ class TelegramPollingRuntime:
                 text=result.response_text,
                 reply_markup=self._action_keyboard(context.interface_language),
             )
+            if result.success:
+                self._dispatch_pending_approval_notifications(limit=1, only_user_id=context.user_id)
             return True
 
         if data.startswith("approval_download:"):
@@ -621,54 +655,100 @@ class TelegramPollingRuntime:
                 text=result.response_text,
                 reply_markup=self._action_keyboard(context.interface_language),
             )
+            if result.success:
+                self._dispatch_pending_approval_notifications(limit=1, only_user_id=context.user_id)
             return True
 
         return False
 
-    def _dispatch_pending_approval_notifications(self, *, limit: int) -> None:
-        pending = self._list_pending_approval_notifications.execute(limit=limit)
+    def _dispatch_pending_approval_notifications(self, *, limit: int, only_user_id: int | None = None) -> set[int]:
+        selection_limit = None if only_user_id is not None else limit
+        pending = self._list_pending_approval_notifications.execute(limit=selection_limit)
         dispatched_count = 0
+        notified_user_ids: set[int] = set()
 
         for notification in pending.notifications:
-            available_posts = self._get_available_posts.execute(
-                GetAvailablePostsCommand(user_id=notification.user_id)
-            ).available_posts_count
-            for upload_id in notification.upload_ids:
-                if dispatched_count >= limit:
-                    return
+            if only_user_id is not None and notification.user_id != only_user_id:
+                continue
+            if dispatched_count >= limit:
+                break
 
-                build_result = self._bot.build_approval_batch.handle(HandleBuildApprovalBatchCommand(upload_id=upload_id))
-                if not build_result.success or build_result.batch_id is None:
-                    continue
+            build_result = self._bot.build_approval_batch.handle(
+                HandleBuildApprovalBatchCommand(upload_id=notification.upload_id)
+            )
+            if not build_result.success or build_result.batch_id is None:
+                continue
 
+            self._gateway.send_message(
+                chat_id=notification.telegram_user_id,
+                text=self._build_approval_ready_text(
+                    language=notification.interface_language,
+                    queue_count=notification.queue_count,
+                ),
+                reply_markup=self._approval_keyboard(
+                    language=notification.interface_language,
+                    batch_id=build_result.batch_id,
+                ),
+            )
+
+            notified_result = self._mark_approval_batch_notified.execute(
+                MarkApprovalBatchNotifiedCommand(batch_id=build_result.batch_id)
+            )
+            if not notified_result.success:
+                log_event(
+                    self._logger,
+                    level=30,
+                    module="infrastructure.telegram.runtime",
+                    action="approval_batch_mark_notified",
+                    result="failure",
+                    extra={
+                        "batch_id": build_result.batch_id,
+                        "error_code": notified_result.error_code,
+                    },
+                )
+            dispatched_count += 1
+            notified_user_ids.add(notification.user_id)
+
+        return notified_user_ids
+
+    def _process_expired_approval_sessions(self, *, timeout_minutes: int, limit: int) -> None:
+        selection = self._select_expirable_approval_batches.execute(
+            SelectExpirableApprovalBatchesCommand(
+                older_than_minutes=timeout_minutes,
+                statuses=(ApprovalBatchStatus.USER_NOTIFIED,),
+                limit=limit,
+                now_utc=self._utcnow_provider(),
+            )
+        )
+        if not selection.selected_batch_ids:
+            return
+
+        for batch_id in selection.selected_batch_ids:
+            result = self._archive_approval_inbox_timeout.execute(
+                ArchiveApprovalInboxTimeoutCommand(
+                    batch_id=batch_id,
+                    timeout_minutes=timeout_minutes,
+                    now_utc=self._utcnow_provider(),
+                )
+            )
+            if not result.success or result.telegram_user_id is None or result.interface_language is None:
+                continue
+            if result.zip_storage_path and result.zip_file_name:
+                payload = self._bot.file_storage.read_bytes(result.zip_storage_path)
+                self._gateway.send_document(
+                    chat_id=result.telegram_user_id,
+                    file_name=result.zip_file_name,
+                    payload=payload,
+                )
                 self._gateway.send_message(
-                    chat_id=notification.telegram_user_id,
-                    text=self._build_approval_ready_text(
-                        language=notification.interface_language,
-                        available_posts_count=available_posts,
+                    chat_id=result.telegram_user_id,
+                    text=get_message(
+                        result.interface_language,
+                        "APPROVAL_TIMEOUT_ARCHIVE_SENT",
+                        count=len(result.archived_task_ids),
                     ),
-                    reply_markup=self._approval_keyboard(
-                        language=notification.interface_language,
-                        batch_id=build_result.batch_id,
-                    ),
+                    reply_markup=self._action_keyboard(result.interface_language),
                 )
-
-                notified_result = self._mark_approval_batch_notified.execute(
-                    MarkApprovalBatchNotifiedCommand(batch_id=build_result.batch_id)
-                )
-                if not notified_result.success:
-                    log_event(
-                        self._logger,
-                        level=30,
-                        module="infrastructure.telegram.runtime",
-                        action="approval_batch_mark_notified",
-                        result="failure",
-                        extra={
-                            "batch_id": build_result.batch_id,
-                            "error_code": notified_result.error_code,
-                        },
-                    )
-                dispatched_count += 1
 
     @staticmethod
     def _parse_batch_id(data: str, *, prefix: str) -> int:
@@ -750,10 +830,11 @@ class TelegramPollingRuntime:
             ]
         }
     @staticmethod
-    def _build_approval_ready_text(*, language: InterfaceLanguage, available_posts_count: int) -> str:
+    def _build_approval_ready_text(*, language: InterfaceLanguage, queue_count: int) -> str:
         base_text = get_message(language, "APPROVAL_READY")
-        available_text = get_message(language, "AVAILABLE_POSTS", available=available_posts_count)
-        return f"\u2705 {base_text}\n\n{available_text}"
+        queue_text = get_message(language, "APPROVAL_QUEUE_COUNT", count=queue_count)
+        choose_action_text = get_message(language, "APPROVAL_CHOOSE_ACTION")
+        return f"\u2705 {base_text}\n{queue_text}\n{choose_action_text}"
 
     def _persist_update_offset(self, offset: int) -> None:
         if self._update_checkpoint is None:

@@ -83,7 +83,7 @@ class ValidationModuleTests(unittest.TestCase):
         self.assertIn("SCHEDULE_AT_INVALID", codes)
         self.assertEqual(result.valid_rows_count, 0)
 
-    def test_detects_duplicate_rows(self) -> None:
+    def test_allows_duplicate_rows(self) -> None:
         row_values = {
             "channel": "@news",
             "topic": "AI adoption",
@@ -102,8 +102,8 @@ class ValidationModuleTests(unittest.TestCase):
 
         result = self.validator.validate(upload_id=3, parsed=parsed)
 
-        self.assertEqual(result.valid_rows_count, 1)
-        self.assertTrue(any(item.error_code == "DUPLICATE_ROW" for item in result.errors))
+        self.assertEqual(result.valid_rows_count, 2)
+        self.assertFalse(any(item.error_code == "DUPLICATE_ROW" for item in result.errors))
 
     def test_parses_excel_serial_schedule(self) -> None:
         target_schedule = datetime(2100, 1, 1, 12, 0)

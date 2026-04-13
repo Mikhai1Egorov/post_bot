@@ -164,6 +164,98 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         self.assertEqual(due_result.task.id, task_id)
         self.assertEqual(uow.tasks.tasks[task_id].task_status, TaskStatus.PREPARING)
 
+    def test_claim_approval_task_respects_schedule_at(self) -> None:
+        uow, _, upload_id, rows = self._prepare_validated_upload()
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=44, available_articles_count=5, reserved_articles_count=0, consumed_articles_total=0)
+        )
+        reserve = ReserveBalanceUseCase(uow=uow, logger=logging.getLogger("test.reserve.approval"))
+        reserve.execute(ReserveBalanceCommand(upload_id=upload_id))
+
+        create = TaskCreationUseCase(uow=uow, logger=logging.getLogger("test.create_tasks.approval"))
+        create_result = create.execute(TaskCreationCommand(upload_id=upload_id, normalized_rows=rows))
+        task_id = create_result.created_task_ids[0]
+
+        now = datetime.now().replace(tzinfo=None)
+        task = uow.tasks.tasks[task_id]
+        uow.tasks.tasks[task_id] = replace(
+            task,
+            publish_mode="approval",
+            scheduled_publish_at=now + timedelta(minutes=5),
+        )
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.claim.schedule.approval"))
+        not_due_result = claim.execute(ClaimNextTaskCommand(worker_id="w-approval-schedule"))
+        self.assertIsNone(not_due_result.task)
+        self.assertEqual(uow.tasks.tasks[task_id].task_status, TaskStatus.CREATED)
+
+    def test_claim_skips_future_scheduled_created_and_picks_due_created(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=44, original_filename="tasks.xlsx", storage_path="memory://upload")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.uploads.set_billing_status(upload.id, UploadBillingStatus.CONSUMED)
+        uow.uploads.set_reserved_articles_count(upload.id, 0)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=44, available_articles_count=9, reserved_articles_count=0, consumed_articles_total=2)
+        )
+
+        now = datetime.now().replace(tzinfo=None)
+        future_task = Task(
+            id=1,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="Future",
+            custom_title="Future",
+            keywords_text="future",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=now + timedelta(minutes=15),
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.CREATED,
+            retry_count=0,
+        )
+        due_task = Task(
+            id=2,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="Due",
+            custom_title="Due",
+            keywords_text="due",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=now - timedelta(minutes=1),
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.CREATED,
+            retry_count=0,
+        )
+        uow.tasks.create_many([future_task, due_task])
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.claim.skip_future_pick_due"))
+        result = claim.execute(ClaimNextTaskCommand(worker_id="w-due"))
+
+        self.assertIsNotNone(result.task)
+        self.assertEqual(result.task.id, 2)
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.PREPARING)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.CREATED)
+
     def test_claim_requeued_task_is_claimable_without_double_consume(self) -> None:
         uow = InMemoryUnitOfWork()
         upload = uow.uploads.create_received(user_id=44, original_filename="tasks.xlsx", storage_path="memory://upload")
@@ -379,6 +471,76 @@ class TaskCreationAndClaimUseCaseTests(unittest.TestCase):
         self.assertEqual(result.task.id, 2)
         self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.PREPARING)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.PUBLISHING)
+
+    def test_claim_created_even_when_another_task_is_researching_and_leased(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload = uow.uploads.create_received(user_id=44, original_filename="tasks.xlsx", storage_path="memory://upload")
+        uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
+        uow.uploads.set_billing_status(upload.id, UploadBillingStatus.CONSUMED)
+        uow.uploads.set_reserved_articles_count(upload.id, 0)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=44, available_articles_count=10, reserved_articles_count=0, consumed_articles_total=2)
+        )
+
+        now = datetime.now().replace(tzinfo=None)
+        blocked_researching = Task(
+            id=1,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="In progress",
+            custom_title="In progress",
+            keywords_text="progress",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.RESEARCHING,
+            retry_count=0,
+            claimed_by="worker-1",
+            claimed_at=now - timedelta(seconds=10),
+            lease_until=now + timedelta(minutes=5),
+        )
+        fresh_created = Task(
+            id=2,
+            upload_id=upload.id,
+            user_id=44,
+            target_channel="@news",
+            topic_text="Fresh",
+            custom_title="Fresh",
+            keywords_text="fresh",
+            source_time_range="24h",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="journalistic",
+            content_length_code="medium",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.CREATED,
+            retry_count=0,
+        )
+        uow.tasks.create_many([blocked_researching, fresh_created])
+
+        claim = ClaimNextTaskUseCase(uow=uow, logger=logging.getLogger("test.claim.researching_leased"))
+        result = claim.execute(ClaimNextTaskCommand(worker_id="worker-2"))
+
+        self.assertIsNotNone(result.task)
+        self.assertEqual(result.task.id, 2)
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.PREPARING)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.RESEARCHING)
 
     def test_claim_next_task_concurrently_no_duplicates(self) -> None:
         uow, _, upload_id, rows = self._prepare_validated_upload()

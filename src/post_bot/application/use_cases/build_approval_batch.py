@@ -59,6 +59,7 @@ class BuildApprovalBatchUseCase:
                     )
                 tasks = self._uow.tasks.list_by_upload(upload.id)
                 ready_tasks = [task for task in tasks if task.task_status == TaskStatus.READY_FOR_APPROVAL]
+                ready_tasks = sorted(ready_tasks, key=lambda item: item.id)
                 if not ready_tasks:
                     raise BusinessRuleError(
                         code="APPROVAL_TASKS_NOT_FOUND",
@@ -66,66 +67,65 @@ class BuildApprovalBatchUseCase:
                         details={"upload_id": upload.id},
                     )
 
-                task_ids = [task.id for task in ready_tasks]
-                ready_task_id_set = set(task_ids)
+                selected_task = ready_tasks[0]
+                task_ids = [selected_task.id]
                 existing_batch = self._uow.approval_batches.find_by_upload(upload.id)
-                existing_task_ids: tuple[int, ...] = tuple()
                 if existing_batch is not None:
                     existing_task_ids = tuple(self._uow.approval_batch_items.list_task_ids(existing_batch.id))
-
-                if (
-                    existing_batch is not None
-                    and existing_batch.zip_artifact_id is not None
-                    and existing_batch.batch_status in {ApprovalBatchStatus.READY, ApprovalBatchStatus.USER_NOTIFIED}
-                    and set(existing_task_ids) == ready_task_id_set
-                ):
-                    zip_artifact = self._uow.artifacts.get_by_id(existing_batch.zip_artifact_id)
-                    if zip_artifact is None:
-                        raise InternalError(
-                            code="APPROVAL_ZIP_ARTIFACT_MISSING",
-                            message="Approval batch references missing zip artifact.",
-                            details={"batch_id": existing_batch.id, "upload_id": upload.id},
-                        )
-                    return BuildApprovalBatchResult(
-                        upload_id=upload.id,
-                        success=True,
-                        batch_id=existing_batch.id,
-                        zip_artifact_id=zip_artifact.id,
-                        zip_storage_path=zip_artifact.storage_path,
-                        task_ids=existing_task_ids,
-                        error_code=None,
+                    existing_task_id = existing_task_ids[0] if existing_task_ids else None
+                    existing_task = (
+                        self._uow.tasks.get_by_id_for_update(existing_task_id)
+                        if existing_task_id is not None
+                        else None
                     )
+                    if (
+                        existing_batch.zip_artifact_id is not None
+                        and existing_batch.batch_status in {ApprovalBatchStatus.READY, ApprovalBatchStatus.USER_NOTIFIED}
+                        and existing_task is not None
+                        and existing_task.task_status == TaskStatus.READY_FOR_APPROVAL
+                        and existing_task.id == selected_task.id
+                    ):
+                        zip_artifact = self._uow.artifacts.get_by_id(existing_batch.zip_artifact_id)
+                        if zip_artifact is None:
+                            raise InternalError(
+                                code="APPROVAL_ZIP_ARTIFACT_MISSING",
+                                message="Approval batch references missing zip artifact.",
+                                details={"batch_id": existing_batch.id, "upload_id": upload.id},
+                            )
+                        return BuildApprovalBatchResult(
+                            upload_id=upload.id,
+                            success=True,
+                            batch_id=existing_batch.id,
+                            zip_artifact_id=zip_artifact.id,
+                            zip_storage_path=zip_artifact.storage_path,
+                            task_ids=existing_task_ids,
+                            error_code=None,
+                        )
 
-                # New READY_FOR_APPROVAL set appeared after previous notification batch.
-                # Expire active batch so old callback buttons become deterministic no-ops.
-                if (
-                    existing_batch is not None
-                    and existing_batch.batch_status in {ApprovalBatchStatus.READY, ApprovalBatchStatus.USER_NOTIFIED}
-                ):
-                    self._uow.approval_batches.set_status(existing_batch.id, ApprovalBatchStatus.EXPIRED)
+                    if existing_batch.batch_status in {ApprovalBatchStatus.READY, ApprovalBatchStatus.USER_NOTIFIED}:
+                        self._uow.approval_batches.set_status(existing_batch.id, ApprovalBatchStatus.EXPIRED)
 
                 artifact_refs: list[tuple[int, str, str]] = []
-                for task in ready_tasks:
-                    artifacts = self._uow.artifacts.list_by_task(task.id)
-                    html_artifact = next(
-                        (
-                            artifact
-                            for artifact in artifacts
-                            if artifact.artifact_type == ArtifactType.HTML and artifact.is_final
-                        ),
-                        None,
+                artifacts = self._uow.artifacts.list_by_task(selected_task.id)
+                html_artifact = next(
+                    (
+                        artifact
+                        for artifact in artifacts
+                        if artifact.artifact_type == ArtifactType.HTML and artifact.is_final
+                    ),
+                    None,
+                )
+                if html_artifact is None:
+                    raise BusinessRuleError(
+                        code="TASK_HTML_ARTIFACT_MISSING",
+                        message="Final HTML artifact is required for approval batch.",
+                        details={"task_id": selected_task.id, "upload_id": upload.id},
                     )
-                    if html_artifact is None:
-                        raise BusinessRuleError(
-                            code="TASK_HTML_ARTIFACT_MISSING",
-                            message="Final HTML artifact is required for approval batch.",
-                            details={"task_id": task.id, "upload_id": upload.id},
-                    )
-                    archive_file_name = self._normalize_archive_file_name(
-                        file_name=html_artifact.file_name,
-                        task_id=task.id,
-                    )
-                    artifact_refs.append((task.id, html_artifact.storage_path, archive_file_name))
+                archive_file_name = self._normalize_archive_file_name(
+                    file_name=html_artifact.file_name,
+                    task_id=selected_task.id,
+                )
+                artifact_refs.append((selected_task.id, html_artifact.storage_path, archive_file_name))
 
                 batch = self._uow.approval_batches.create_ready(upload_id=upload.id, user_id=upload.user_id)
                 created_batch_id = batch.id

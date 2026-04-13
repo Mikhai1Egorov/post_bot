@@ -74,39 +74,12 @@ class ExcelContractValidator:
                     )
                 )
 
-        dedupe: set[tuple[Any, ...]] = set()
-
         for row in parsed.rows:
             row_errors_before = len(errors)
             row_values = dict(row.values)
             normalized = self._normalize_row(upload_id=upload_id, excel_row=row.excel_row, values=row_values, errors=errors)
             if normalized is None:
                 continue
-
-            key = (
-                normalized.channel,
-                normalized.title,
-                normalized.keywords,
-                normalized.response_language,
-                normalized.include_image,
-                normalized.footer_text,
-                normalized.footer_link,
-                normalized.schedule_at.isoformat() if normalized.schedule_at else None,
-                normalized.mode,
-            )
-            if key in dedupe:
-                errors.append(
-                    UploadValidationErrorItem(
-                        upload_id=upload_id,
-                        excel_row=row.excel_row,
-                        column_name="*",
-                        error_code="DUPLICATE_ROW",
-                        error_message="Duplicate task row.",
-                        bad_value=None,
-                    )
-                )
-            else:
-                dedupe.add(key)
 
             if len(errors) == row_errors_before:
                 normalized_rows.append(normalized)

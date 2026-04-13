@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 import sys
 from pathlib import Path
 import unittest
@@ -12,6 +13,8 @@ from post_bot.application.use_cases.get_available_posts import GetAvailablePosts
 from post_bot.application.use_cases.get_user_context import GetUserContextUseCase  # noqa: E402
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase  # noqa: E402
 from post_bot.application.use_cases.mark_approval_batch_notified import MarkApprovalBatchNotifiedUseCase  # noqa: E402
+from post_bot.application.use_cases.archive_approval_inbox_timeout import ArchiveApprovalInboxTimeoutUseCase  # noqa: E402
+from post_bot.application.use_cases.select_expirable_approval_batches import SelectExpirableApprovalBatchesUseCase  # noqa: E402
 from post_bot.domain.models import BalanceSnapshot, ParsedExcelData, ParsedExcelRow, Task  # noqa: E402
 from post_bot.infrastructure.runtime.bot_wiring import build_bot_wiring  # noqa: E402
 from post_bot.infrastructure.runtime.telegram_runtime import (  # noqa: E402
@@ -25,6 +28,7 @@ from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
     InMemoryFileStorage,
     InMemoryUnitOfWork,
 )
+from post_bot.infrastructure.storage.zip_builder import ZipBuilder  # noqa: E402
 from post_bot.shared.errors import AppError, BusinessRuleError, ExternalDependencyError, ValidationError  # noqa: E402
 from post_bot.shared.localization import get_message  # noqa: E402
 from post_bot.shared.enums import (  # noqa: E402
@@ -124,6 +128,27 @@ class ExpiredCallbackTelegramGateway(FakeTelegramGateway):
         )
 
 
+class PollAwareTelegramGateway(FakeTelegramGateway):
+    def __init__(
+        self,
+        *,
+        updates: list[dict],
+        files: dict[str, TelegramDownloadedFile],
+        on_poll=None,  # noqa: ANN001
+    ) -> None:
+        super().__init__(updates=updates, files=files)
+        self.on_poll = on_poll
+        self.poll_timeouts: list[int] = []
+        self.poll_calls = 0
+
+    def get_updates(self, *, offset: int | None, timeout_seconds: int) -> list[dict]:
+        self.poll_calls += 1
+        self.poll_timeouts.append(timeout_seconds)
+        if self.on_poll is not None:
+            self.on_poll(self.poll_calls)
+        return super().get_updates(offset=offset, timeout_seconds=timeout_seconds)
+
+
 class FakeClock:
     def __init__(self, start: float = 0.0) -> None:
         self.value = start
@@ -133,6 +158,17 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.value += seconds
+
+
+class FakeDateTimeClock:
+    def __init__(self, start: datetime | None = None) -> None:
+        self.value = start or datetime(2026, 4, 13, 12, 0, 0)
+
+    def now(self) -> datetime:
+        return self.value
+
+    def advance(self, *, seconds: int = 0, minutes: int = 0) -> None:
+        self.value = self.value + timedelta(seconds=seconds, minutes=minutes)
 
 
 class FakeUpdateCheckpoint:
@@ -153,6 +189,7 @@ class TelegramRuntimeTests(unittest.TestCase):
         publisher: FakePublisher | None = None,
         excel_parser: object | None = None,
         now_provider=None,  # noqa: ANN001
+        utcnow_provider=None,  # noqa: ANN001
         update_checkpoint=None,  # noqa: ANN001
     ) -> TelegramPollingRuntime:
         parser = excel_parser or FakeExcelTaskParser(
@@ -200,6 +237,17 @@ class TelegramRuntimeTests(unittest.TestCase):
             uow=uow,
             logger=logging.getLogger("test.telegram.mark_approval_batch_notified"),
         )
+        select_expirable_approval_batches = SelectExpirableApprovalBatchesUseCase(
+            uow=uow,
+            logger=logging.getLogger("test.telegram.select_expirable_approval_batches"),
+        )
+        archive_approval_inbox_timeout = ArchiveApprovalInboxTimeoutUseCase(
+            uow=uow,
+            file_storage=effective_storage,
+            artifact_storage=effective_storage,
+            zip_builder=ZipBuilder(),
+            logger=logging.getLogger("test.telegram.archive_approval_inbox_timeout"),
+        )
 
         return TelegramPollingRuntime(
             gateway=gateway,
@@ -208,8 +256,11 @@ class TelegramRuntimeTests(unittest.TestCase):
             get_user_context=get_user_context,
             list_pending_approval_notifications=list_pending_approval_notifications,
             mark_approval_batch_notified=mark_approval_batch_notified,
+            select_expirable_approval_batches=select_expirable_approval_batches,
+            archive_approval_inbox_timeout=archive_approval_inbox_timeout,
             logger=logging.getLogger("test.telegram.runtime"),
             now_provider=now_provider,
+            utcnow_provider=utcnow_provider,
             update_checkpoint=update_checkpoint,
         )
 
@@ -596,6 +647,166 @@ class TelegramRuntimeTests(unittest.TestCase):
         approval_messages = [msg for msg in gateway.sent_messages if "Materials are ready." in msg["text"]]
         self.assertEqual(len(approval_messages), 1)
 
+    def test_timeout_archives_current_inbox_with_single_zip(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id_a, task_id_a = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=807,
+        )
+        _, _, task_id_b = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=807,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id_a,
+            user_id=user_id,
+            task_id=task_id_a,
+        )
+        uow.approval_batches.records[batch_id].notified_at = datetime.now().replace(tzinfo=None) - timedelta(minutes=11)
+
+        gateway = FakeTelegramGateway(updates=[], files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage)
+
+        result = runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=1,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+                approval_dispatch_interval_seconds=0.0,
+            )
+        )
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(len(gateway.sent_documents), 1)
+        self.assertTrue(gateway.sent_documents[0]["file_name"].startswith("approval_timeout_user_"))
+        timeout_messages = [msg for msg in gateway.sent_messages if "Approval timed out." in msg["text"]]
+        self.assertEqual(len(timeout_messages), 1)
+        self.assertEqual(uow.tasks.tasks[task_id_a].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[task_id_b].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.approval_batches.records[batch_id].batch_status, ApprovalBatchStatus.DOWNLOADED)
+        self.assertFalse(any("Materials are ready." in msg["text"] for msg in gateway.sent_messages))
+
+    def test_new_ready_tasks_during_session_do_not_reset_timeout_timer(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        clock = FakeDateTimeClock(start=datetime(2026, 4, 13, 12, 0, 0))
+        user_id, upload_id, task_id_a = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=808,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id,
+            user_id=user_id,
+            task_id=task_id_a,
+        )
+        uow.approval_batches.records[batch_id].notified_at = clock.now()
+
+        gateway = FakeTelegramGateway(updates=[], files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage, utcnow_provider=clock.now)
+
+        runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=1,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+                approval_dispatch_interval_seconds=0.0,
+            )
+        )
+        self.assertEqual(len(gateway.sent_documents), 0)
+
+        clock.advance(minutes=9)
+        runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=1,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+                approval_dispatch_interval_seconds=0.0,
+            )
+        )
+        self.assertEqual(len(gateway.sent_documents), 0)
+
+        _, _, task_id_b = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=808,
+        )
+        clock.advance(minutes=2)
+        runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=1,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+                approval_dispatch_interval_seconds=0.0,
+            )
+        )
+
+        self.assertEqual(len(gateway.sent_documents), 1)
+        timeout_messages = [msg for msg in gateway.sent_messages if "Approval timed out." in msg["text"]]
+        self.assertEqual(len(timeout_messages), 1)
+        self.assertEqual(uow.tasks.tasks[task_id_a].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[task_id_b].task_status, TaskStatus.DONE)
+
+    def test_action_on_expiring_session_prevents_old_timeout_archive(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id_a, task_id_a = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=809,
+        )
+        _, _, task_id_b = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=809,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id_a,
+            user_id=user_id,
+            task_id=task_id_a,
+        )
+        # Emulate a session near timeout: after callback action this old timer must not archive the next task.
+        uow.approval_batches.records[batch_id].notified_at = datetime.now().replace(tzinfo=None) - timedelta(minutes=11)
+
+        updates = [
+            {
+                "update_id": 260,
+                "callback_query": {
+                    "id": "cb-publish-near-timeout",
+                    "from": {"id": 809},
+                    "message": {"message_id": 8, "chat": {"id": 809}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage, publisher=FakePublisher())
+
+        result = runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=1,
+                poll_timeout_seconds=1,
+                idle_sleep_seconds=0.0,
+                approval_dispatch_interval_seconds=0.0,
+            )
+        )
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(uow.tasks.tasks[task_id_a].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[task_id_b].task_status, TaskStatus.READY_FOR_APPROVAL)
+        self.assertEqual(len(gateway.sent_documents), 0)
+        self.assertFalse(any("Approval timed out." in msg["text"] for msg in gateway.sent_messages))
+        self.assertTrue(any("Materials are ready." in msg["text"] for msg in gateway.sent_messages))
+
     def test_instructions_callback_without_language_requests_selection(self) -> None:
         updates = [
             {
@@ -697,7 +908,8 @@ class TelegramRuntimeTests(unittest.TestCase):
         approval_messages = [msg for msg in gateway.sent_messages if "Materials are ready." in msg["text"]]
         self.assertEqual(len(approval_messages), 1)
         self.assertIn("\u2705", approval_messages[0]["text"])
-        self.assertIn("Available posts count: 0.", approval_messages[0]["text"])
+        self.assertIn("Tasks in queue: 1", approval_messages[0]["text"])
+        self.assertIn("Choose an action:", approval_messages[0]["text"])
         keyboard = approval_messages[0]["reply_markup"]
         self.assertIsNotNone(keyboard)
         callback_data = [button["callback_data"] for button in keyboard["inline_keyboard"][0]]
@@ -708,6 +920,253 @@ class TelegramRuntimeTests(unittest.TestCase):
         batch = next(iter(uow.approval_batches.records.values()))
         self.assertEqual(batch.batch_status, ApprovalBatchStatus.USER_NOTIFIED)
         self.assertIsNotNone(batch.notified_at)
+
+    def test_publish_processes_only_current_task_and_shows_next_queue_item(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id_a, task_id_a = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=720,
+        )
+        _, _, task_id_b = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=720,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id_a,
+            user_id=user_id,
+            task_id=task_id_a,
+        )
+
+        updates = [
+            {
+                "update_id": 210,
+                "callback_query": {
+                    "id": "cb-publish-queue",
+                    "from": {"id": 720},
+                    "message": {"message_id": 2, "chat": {"id": 720}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage, publisher=FakePublisher())
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(uow.tasks.tasks[task_id_a].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[task_id_b].task_status, TaskStatus.READY_FOR_APPROVAL)
+        ready_messages = [msg for msg in gateway.sent_messages if "Materials are ready." in msg["text"]]
+        self.assertEqual(len(ready_messages), 1)
+        self.assertIn("Tasks in queue: 1", ready_messages[0]["text"])
+        self.assertFalse(any("APPROVAL_BATCH_EXPIRED" in msg["text"] for msg in gateway.sent_messages))
+
+    def test_download_processes_only_current_task_and_shows_next_queue_item(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id_a, task_id_a = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=721,
+        )
+        _, _, task_id_b = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=721,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id_a,
+            user_id=user_id,
+            task_id=task_id_a,
+        )
+
+        updates = [
+            {
+                "update_id": 211,
+                "callback_query": {
+                    "id": "cb-download-queue",
+                    "from": {"id": 721},
+                    "message": {"message_id": 2, "chat": {"id": 721}},
+                    "data": f"approval_download:{batch_id}",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage)
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(uow.tasks.tasks[task_id_a].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[task_id_b].task_status, TaskStatus.READY_FOR_APPROVAL)
+        ready_messages = [msg for msg in gateway.sent_messages if "Materials are ready." in msg["text"]]
+        self.assertEqual(len(ready_messages), 1)
+        self.assertIn("Tasks in queue: 1", ready_messages[0]["text"])
+
+    def test_does_not_send_all_processed_after_last_approval_task(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id, task_id = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=722,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id,
+            user_id=user_id,
+            task_id=task_id,
+        )
+
+        updates = [
+            {
+                "update_id": 212,
+                "callback_query": {
+                    "id": "cb-publish-last",
+                    "from": {"id": 722},
+                    "message": {"message_id": 2, "chat": {"id": 722}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage, publisher=FakePublisher())
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertFalse(any("All materials are processed." in msg["text"] for msg in gateway.sent_messages))
+
+    def test_new_ready_task_after_publish_is_notified_without_new_user_click(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        clock = FakeClock(start=0.0)
+        user_id, upload_id_a, task_id_a = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=724,
+        )
+        _, _, task_id_b = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=724,
+        )
+        uow.tasks.set_task_status(task_id_b, TaskStatus.GENERATING, changed_by="test", reason="hold_second_task")
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id_a,
+            user_id=user_id,
+            task_id=task_id_a,
+        )
+
+        def on_poll(call_number: int) -> None:
+            if call_number == 2:
+                uow.tasks.set_task_status(task_id_b, TaskStatus.READY_FOR_APPROVAL, changed_by="test", reason="ready_after_publish")
+            clock.advance(5.0)
+
+        updates = [
+            {
+                "update_id": 215,
+                "callback_query": {
+                    "id": "cb-publish-next-later",
+                    "from": {"id": 724},
+                    "message": {"message_id": 2, "chat": {"id": 724}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            }
+        ]
+        gateway = PollAwareTelegramGateway(updates=updates, files={}, on_poll=on_poll)
+        runtime = self._build_runtime(
+            gateway=gateway,
+            uow=uow,
+            storage=storage,
+            publisher=FakePublisher(),
+            now_provider=clock.now,
+        )
+
+        result = runtime.run(
+            TelegramRuntimeCommand(
+                max_cycles=2,
+                poll_timeout_seconds=30,
+                idle_sleep_seconds=0.0,
+                approval_dispatch_interval_seconds=5.0,
+            )
+        )
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(uow.tasks.tasks[task_id_a].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[task_id_b].task_status, TaskStatus.READY_FOR_APPROVAL)
+        ready_messages = [msg for msg in gateway.sent_messages if "Materials are ready." in msg["text"]]
+        self.assertEqual(len(ready_messages), 1)
+        self.assertIn("Tasks in queue: 1", ready_messages[0]["text"])
+        self.assertFalse(any("All materials are processed." in msg["text"] for msg in gateway.sent_messages))
+        self.assertEqual(gateway.poll_timeouts, [5, 5])
+
+    def test_repeat_click_on_old_button_is_idempotent_and_does_not_break_queue(self) -> None:
+        storage = InMemoryFileStorage()
+        uow = InMemoryUnitOfWork()
+        user_id, upload_id_a, task_id_a = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=723,
+        )
+        _, _, task_id_b = self._seed_approval_ready_task(
+            uow=uow,
+            storage=storage,
+            telegram_user_id=723,
+        )
+        batch_id, _, _ = self._seed_approval_batch(
+            uow=uow,
+            storage=storage,
+            upload_id=upload_id_a,
+            user_id=user_id,
+            task_id=task_id_a,
+        )
+
+        updates = [
+            {
+                "update_id": 213,
+                "callback_query": {
+                    "id": "cb-publish-1",
+                    "from": {"id": 723},
+                    "message": {"message_id": 2, "chat": {"id": 723}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            },
+            {
+                "update_id": 214,
+                "callback_query": {
+                    "id": "cb-publish-2",
+                    "from": {"id": 723},
+                    "message": {"message_id": 2, "chat": {"id": 723}},
+                    "data": f"approval_publish:{batch_id}",
+                },
+            },
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=uow, storage=storage, publisher=FakePublisher())
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(uow.tasks.tasks[task_id_a].task_status, TaskStatus.DONE)
+        self.assertEqual(uow.tasks.tasks[task_id_b].task_status, TaskStatus.READY_FOR_APPROVAL)
+        published_rows = [
+            row
+            for row in uow.publications.records.values()
+            if row.task_id == task_id_a and row.publication_status == PublicationStatus.PUBLISHED
+        ]
+        self.assertEqual(len(published_rows), 1)
+        self.assertFalse(any("All materials are processed." in msg["text"] for msg in gateway.sent_messages))
 
     def test_handles_approval_download_callback(self) -> None:
         storage = InMemoryFileStorage()

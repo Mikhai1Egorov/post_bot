@@ -28,7 +28,7 @@ from post_bot.pipeline.modules.preparation import PreparationModule  # noqa: E40
 from post_bot.pipeline.modules.prompt_resolver import PromptResolverModule  # noqa: E402
 from post_bot.pipeline.modules.research import ResearchModule  # noqa: E402
 from post_bot.shared.enums import TaskBillingState, TaskStatus, UploadBillingStatus, UploadStatus  # noqa: E402
-from post_bot.shared.errors import BusinessRuleError  # noqa: E402
+from post_bot.shared.errors import BusinessRuleError, ExternalDependencyError  # noqa: E402
 
 
 class _AlwaysFailingCycle:
@@ -72,6 +72,18 @@ class _FailingExecuteWithAppErrorUseCase:
     def execute(self, command):  # noqa: ANN001
         _ = command
         raise BusinessRuleError(code="EXECUTE_APP_ERROR", message="Execute app error")
+
+
+class _FailFirstLLMClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, *, model_name: str, prompt: str, response_language: str) -> str:
+        _ = (model_name, prompt, response_language)
+        self.calls += 1
+        if self.calls == 1:
+            raise ExternalDependencyError(code="LLM_TIMEOUT", message="timeout", retryable=True)
+        return "# Title\nParagraph"
 
 
 class WorkerRuntimeTests(unittest.TestCase):
@@ -152,6 +164,34 @@ class WorkerRuntimeTests(unittest.TestCase):
         )
         return WorkerRuntime(run_worker_cycle=cycle, logger=logging.getLogger("test.runtime.worker"))
 
+    @staticmethod
+    def _seed_second_created_task(uow: InMemoryUnitOfWork) -> None:
+        upload = next(iter(uow.uploads.uploads.values()))
+        task = Task(
+            id=2,
+            upload_id=upload.id,
+            user_id=upload.user_id,
+            target_channel="@news",
+            topic_text="Second task",
+            custom_title="Second task",
+            keywords_text="ai, automation",
+            source_time_range="",
+            source_language_code="en",
+            response_language_code="en",
+            style_code="",
+            content_length_code="",
+            include_image_flag=False,
+            footer_text=None,
+            footer_link_url=None,
+            scheduled_publish_at=None,
+            publish_mode="instant",
+            article_cost=1,
+            billing_state=TaskBillingState.CONSUMED,
+            task_status=TaskStatus.CREATED,
+            retry_count=0,
+        )
+        uow.tasks.create_many([task])
+
     def test_bounded_runtime_processes_until_queue_empty(self) -> None:
         uow = InMemoryUnitOfWork()
         self._seed_upload_and_task(uow)
@@ -203,6 +243,25 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(result.cycles_executed, 2)
         self.assertFalse(result.terminated_early)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
+
+    def test_retryable_first_task_does_not_block_second_created_task(self) -> None:
+        uow = InMemoryUnitOfWork()
+        self._seed_upload_and_task(uow)
+        self._seed_second_created_task(uow)
+        llm = _FailFirstLLMClient()
+        runtime = self._build_runtime(uow=uow, llm=llm)  # type: ignore[arg-type]
+
+        result = runtime.run(WorkerRuntimeCommand(worker_id="worker-1", model_name="gpt-test", max_cycles=5))
+
+        self.assertEqual(result.cycles_executed, 3)
+        self.assertEqual(result.tasks_processed, 2)
+        self.assertEqual(result.failed_cycles, 1)
+        self.assertFalse(result.terminated_early)
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.QUEUED)
+        self.assertEqual(uow.tasks.tasks[1].retry_count, 1)
+        self.assertIsNotNone(uow.tasks.tasks[1].next_attempt_at)
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.DONE)
 
     def test_runtime_counts_failed_cycle_without_task(self) -> None:
         runtime = WorkerRuntime(

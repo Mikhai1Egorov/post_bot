@@ -147,6 +147,50 @@ class PublishTaskUseCase:
                         details={"task_id": task.id, "task_status": task.task_status.value},
                     )
 
+                now = datetime.now().replace(tzinfo=None)
+                if (
+                    task.publish_mode == "instant"
+                    and task.scheduled_publish_at is not None
+                    and task.scheduled_publish_at > now
+                ):
+                    deferred_retry_count = task.retry_count if task.retry_count > 0 else 1
+                    self._uow.tasks.set_retry_state(
+                        task.id,
+                        retry_count=deferred_retry_count,
+                        last_error_message="PUBLISH_DEFERRED_UNTIL_SCHEDULE",
+                        next_attempt_at=task.scheduled_publish_at,
+                    )
+                    self._uow.tasks.set_task_lease(
+                        task.id,
+                        claimed_by=None,
+                        claimed_at=None,
+                        lease_until=None,
+                    )
+                    self._uow.commit()
+                    log_event(
+                        self._logger,
+                        level=20,
+                        module="application.publish_task",
+                        action="publish_deferred_until_schedule",
+                        result="success",
+                        status_before=status_before.value if status_before else None,
+                        status_after=TaskStatus.PUBLISHING.value,
+                        duration_ms=timer.elapsed_ms(),
+                        extra={
+                            "task_id": task.id,
+                            "next_attempt_at": task.scheduled_publish_at.isoformat(sep=" "),
+                            "publish_mode": task.publish_mode,
+                        },
+                    )
+                    return PublishTaskResult(
+                        task_id=task.id,
+                        success=True,
+                        task_status=TaskStatus.PUBLISHING,
+                        publication_id=None,
+                        external_message_id=None,
+                        error_code=None,
+                    )
+
                 render = self._uow.renders.get_by_task_id(task.id)
                 if render is None or render.render_status != RenderStatus.SUCCEEDED or not render.body_html:
                     raise BusinessRuleError(

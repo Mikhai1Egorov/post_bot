@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from logging import Logger
 
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
-from post_bot.shared.enums import ApprovalBatchStatus, InterfaceLanguage, TaskStatus
+from post_bot.shared.enums import InterfaceLanguage, TaskStatus
 from post_bot.shared.logging import log_event
 
 @dataclass(slots=True, frozen=True)
@@ -14,7 +14,8 @@ class PendingApprovalNotification:
     user_id: int
     telegram_user_id: int
     interface_language: InterfaceLanguage
-    upload_ids: tuple[int, ...]
+    upload_id: int
+    queue_count: int
 
 @dataclass(slots=True, frozen=True)
 class ListPendingApprovalNotificationsResult:
@@ -32,46 +33,15 @@ class ListPendingApprovalNotificationsUseCase:
             return ListPendingApprovalNotificationsResult(notifications=tuple())
 
         with self._uow:
-            ready_by_upload: dict[int, tuple[int, set[int]]] = {}
             tasks = self._uow.tasks.list_by_statuses((TaskStatus.READY_FOR_APPROVAL,))
+            tasks = sorted(tasks, key=lambda task: task.id)
+            ready_by_user: dict[int, list] = {}
 
             for task in tasks:
-                bucket = ready_by_upload.get(task.upload_id)
-                if bucket is None:
-                    ready_by_upload[task.upload_id] = (task.user_id, {task.id})
-                    continue
-                user_id, task_ids = bucket
-                if user_id != task.user_id:
-                    # Defensive: upload should belong to one user.
-                    # Keep the first user to avoid cross-user notification mixing.
-                    continue
-                task_ids.add(task.id)
-
-            grouped_uploads: dict[int, set[int]] = {}
-            for upload_id, (user_id, ready_task_ids) in ready_by_upload.items():
-                batch = self._uow.approval_batches.find_by_upload(upload_id)
-                if batch is None:
-                    grouped_uploads.setdefault(user_id, set()).add(upload_id)
-                    continue
-
-                if batch.batch_status == ApprovalBatchStatus.READY:
-                    grouped_uploads.setdefault(user_id, set()).add(upload_id)
-                    continue
-
-                if batch.batch_status == ApprovalBatchStatus.USER_NOTIFIED:
-                    batch_task_ids = set(self._uow.approval_batch_items.list_task_ids(batch.id))
-                    if batch_task_ids != ready_task_ids:
-                        grouped_uploads.setdefault(user_id, set()).add(upload_id)
-                    continue
-
-                # Terminal batch statuses should not block new ready tasks from notification.
-                grouped_uploads.setdefault(user_id, set()).add(upload_id)
-
-            if limit is not None:
-                grouped_uploads = self._apply_upload_limit(grouped_uploads=grouped_uploads, limit=limit)
+                ready_by_user.setdefault(task.user_id, []).append(task)
 
             notifications: list[PendingApprovalNotification] = []
-            for user_id in sorted(grouped_uploads.keys()):
+            for user_id in sorted(ready_by_user.keys()):
                 user = self._uow.users.get_by_id_for_update(user_id)
                 if user is None:
                     log_event(
@@ -95,28 +65,34 @@ class ListPendingApprovalNotificationsUseCase:
                         extra={"user_id": user_id, "interface_language": user.interface_language},
                     )
                     continue
+                ready_tasks = ready_by_user[user_id]
+                if not ready_tasks:
+                    continue
+
+                active_batch = self._uow.approval_batches.find_active_by_user(user_id)
+                if active_batch is not None:
+                    active_task_ids = self._uow.approval_batch_items.list_task_ids(active_batch.id)
+                    if active_task_ids:
+                        active_task_id = active_task_ids[0]
+                        if any(task.id == active_task_id for task in ready_tasks):
+                            # There is already an active approval prompt for this user.
+                            continue
 
                 notifications.append(
                     PendingApprovalNotification(
                         user_id=user.id,
                         telegram_user_id=user.telegram_user_id,
                         interface_language=language,
-                        upload_ids=tuple(sorted(grouped_uploads[user_id])),
+                        upload_id=ready_tasks[0].upload_id,
+                        queue_count=len(ready_tasks),
                     )
                 )
+                if limit is not None and len(notifications) >= limit:
+                    break
 
         return ListPendingApprovalNotificationsResult(notifications=tuple(notifications))
 
-    @staticmethod
-    def _apply_upload_limit(*, grouped_uploads: dict[int, set[int]], limit: int) -> dict[int, set[int]]:
-        if limit < 1:
-            return {}
-        remaining = limit
-        limited: dict[int, set[int]] = {}
-        for user_id in sorted(grouped_uploads.keys()):
-            for upload_id in sorted(grouped_uploads[user_id]):
-                if remaining <= 0:
-                    return limited
-                limited.setdefault(user_id, set()).add(upload_id)
-                remaining -= 1
-        return limited
+    def has_ready_tasks_for_user(self, *, user_id: int) -> bool:
+        with self._uow:
+            tasks = self._uow.tasks.list_by_statuses((TaskStatus.READY_FOR_APPROVAL,))
+            return any(task.user_id == user_id for task in tasks)

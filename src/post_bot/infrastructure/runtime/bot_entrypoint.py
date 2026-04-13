@@ -17,10 +17,13 @@ from post_bot.application.use_cases.get_available_posts import GetAvailablePosts
 from post_bot.application.use_cases.get_user_context import GetUserContextUseCase
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase
 from post_bot.application.use_cases.mark_approval_batch_notified import MarkApprovalBatchNotifiedUseCase
+from post_bot.application.use_cases.archive_approval_inbox_timeout import ArchiveApprovalInboxTimeoutUseCase
+from post_bot.application.use_cases.select_expirable_approval_batches import SelectExpirableApprovalBatchesUseCase
 from post_bot.infrastructure.runtime.bot_wiring import build_default_bot_wiring
 from post_bot.infrastructure.runtime.path_resolution import resolve_project_root
 from post_bot.infrastructure.runtime.startup_checks import ensure_runtime_dependencies
 from post_bot.infrastructure.runtime.update_checkpoint import FileTelegramUpdateCheckpoint
+from post_bot.infrastructure.storage.zip_builder import ZipBuilder
 from post_bot.infrastructure.runtime.telegram_runtime import (
     TelegramGatewayPort,
     TelegramPollingRuntime,
@@ -98,6 +101,17 @@ def main() -> int:
             uow=bot_wiring.uow,
             logger=logger.getChild("mark_approval_batch_notified"),
         )
+        select_expirable_approval_batches = SelectExpirableApprovalBatchesUseCase(
+            uow=bot_wiring.uow,
+            logger=logger.getChild("select_expirable_approval_batches"),
+        )
+        archive_approval_inbox_timeout = ArchiveApprovalInboxTimeoutUseCase(
+            uow=bot_wiring.uow,
+            file_storage=bot_wiring.file_storage,
+            artifact_storage=bot_wiring.file_storage,
+            zip_builder=ZipBuilder(),
+            logger=logger.getChild("archive_approval_inbox_timeout"),
+        )
 
         runtime = TelegramPollingRuntime(
             gateway=gateway,
@@ -106,6 +120,8 @@ def main() -> int:
             get_user_context=get_user_context,
             list_pending_approval_notifications=list_pending_approval_notifications,
             mark_approval_batch_notified=mark_approval_batch_notified,
+            select_expirable_approval_batches=select_expirable_approval_batches,
+            archive_approval_inbox_timeout=archive_approval_inbox_timeout,
             logger=logger,
             update_checkpoint=update_checkpoint,
         )

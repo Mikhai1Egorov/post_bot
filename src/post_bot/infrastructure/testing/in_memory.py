@@ -643,6 +643,15 @@ class InMemoryApprovalBatchRepository:
                 return record
         return None
 
+    def find_active_by_user(self, user_id: int) -> ApprovalBatchRecord | None:
+        for batch_id in sorted(self.records.keys(), reverse=True):
+            record = self.records[batch_id]
+            if record.user_id != user_id:
+                continue
+            if record.batch_status in {ApprovalBatchStatus.READY, ApprovalBatchStatus.USER_NOTIFIED}:
+                return record
+        return None
+
     def list_expirable_ids(
         self,
         *,

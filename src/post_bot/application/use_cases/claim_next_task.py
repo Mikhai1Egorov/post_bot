@@ -43,6 +43,7 @@ class ClaimNextTaskUseCase:
         with self._uow:
             claimed = self._uow.tasks.claim_next_for_worker(command.worker_id)
             if claimed is None:
+                diagnostics = self._collect_claim_diagnostics()
                 self._uow.commit()
                 log_event(
                     self._logger,
@@ -51,7 +52,7 @@ class ClaimNextTaskUseCase:
                     action="task_claim_empty",
                     result="success",
                     duration_ms=timer.elapsed_ms(),
-                    extra={"worker_id": command.worker_id},
+                    extra={"worker_id": command.worker_id, **diagnostics},
                 )
                 return ClaimNextTaskResult(task=None)
 
@@ -93,6 +94,7 @@ class ClaimNextTaskUseCase:
 
             self._acquire_task_lease(task_id=claimed.id, worker_id=command.worker_id)
             claimed = self._uow.tasks.get_by_id_for_update(claimed.id) or claimed
+            diagnostics = self._collect_claim_diagnostics()
             self._uow.commit()
 
         log_event(
@@ -104,9 +106,125 @@ class ClaimNextTaskUseCase:
             status_before=status_before.value,
             status_after=claimed.task_status.value,
             duration_ms=timer.elapsed_ms(),
-            extra={"worker_id": command.worker_id, "task_id": claimed.id, "upload_id": claimed.upload_id},
+            extra={
+                "worker_id": command.worker_id,
+                "task_id": claimed.id,
+                "upload_id": claimed.upload_id,
+                **diagnostics,
+            },
         )
         return ClaimNextTaskResult(task=claimed)
+
+    def _collect_claim_diagnostics(self) -> dict[str, int]:
+        now = datetime.now().replace(tzinfo=None)
+        created_tasks = self._uow.tasks.list_by_statuses((TaskStatus.CREATED,))
+        queued_tasks = self._uow.tasks.list_by_statuses((TaskStatus.QUEUED,))
+        publishing_tasks = self._uow.tasks.list_by_statuses((TaskStatus.PUBLISHING,))
+
+        created_due_blocked = sum(1 for task in created_tasks if not self._is_schedule_due(task=task, now=now))
+        created_lease_blocked = sum(
+            1
+            for task in created_tasks
+            if self._is_schedule_due(task=task, now=now) and not self._is_lease_available(task=task, now=now)
+        )
+        created_claimable = len(created_tasks) - created_due_blocked - created_lease_blocked
+
+        queued_fresh = [task for task in queued_tasks if task.retry_count == 0]
+        queued_retry = [task for task in queued_tasks if task.retry_count > 0 and bool(task.last_error_message)]
+        queued_fresh_due_blocked = sum(1 for task in queued_fresh if not self._is_schedule_due(task=task, now=now))
+        queued_fresh_lease_blocked = sum(
+            1
+            for task in queued_fresh
+            if self._is_schedule_due(task=task, now=now) and not self._is_lease_available(task=task, now=now)
+        )
+        queued_fresh_claimable = len(queued_fresh) - queued_fresh_due_blocked - queued_fresh_lease_blocked
+
+        queued_retry_due_blocked = sum(1 for task in queued_retry if not self._is_schedule_due(task=task, now=now))
+        queued_retry_backoff_blocked = sum(
+            1
+            for task in queued_retry
+            if self._is_schedule_due(task=task, now=now) and not self._is_retry_due(task=task, now=now)
+        )
+        queued_retry_lease_blocked = sum(
+            1
+            for task in queued_retry
+            if (
+                self._is_schedule_due(task=task, now=now)
+                and self._is_retry_due(task=task, now=now)
+                and not self._is_lease_available(task=task, now=now)
+            )
+        )
+        queued_retry_claimable = (
+            len(queued_retry) - queued_retry_due_blocked - queued_retry_backoff_blocked - queued_retry_lease_blocked
+        )
+
+        publishing_retry = [task for task in publishing_tasks if task.retry_count > 0 and bool(task.last_error_message)]
+        publishing_retry_due_blocked = sum(
+            1 for task in publishing_retry if not self._is_schedule_due(task=task, now=now)
+        )
+        publishing_retry_backoff_blocked = sum(
+            1
+            for task in publishing_retry
+            if self._is_schedule_due(task=task, now=now) and not self._is_retry_due(task=task, now=now)
+        )
+        publishing_retry_lease_blocked = sum(
+            1
+            for task in publishing_retry
+            if (
+                self._is_schedule_due(task=task, now=now)
+                and self._is_retry_due(task=task, now=now)
+                and not self._is_lease_available(task=task, now=now)
+            )
+        )
+        publishing_retry_claimable = (
+            len(publishing_retry)
+            - publishing_retry_due_blocked
+            - publishing_retry_backoff_blocked
+            - publishing_retry_lease_blocked
+        )
+
+        eligible_total = created_claimable + queued_fresh_claimable + queued_retry_claimable + publishing_retry_claimable
+
+        return {
+            "created_total": len(created_tasks),
+            "created_claimable": created_claimable,
+            "created_due_blocked": created_due_blocked,
+            "created_lease_blocked": created_lease_blocked,
+            "queued_total": len(queued_tasks),
+            "queued_fresh_claimable": queued_fresh_claimable,
+            "queued_fresh_due_blocked": queued_fresh_due_blocked,
+            "queued_fresh_lease_blocked": queued_fresh_lease_blocked,
+            "queued_retry_claimable": queued_retry_claimable,
+            "queued_retry_due_blocked": queued_retry_due_blocked,
+            "queued_retry_backoff_blocked": queued_retry_backoff_blocked,
+            "queued_retry_lease_blocked": queued_retry_lease_blocked,
+            "publishing_retry_total": len(publishing_retry),
+            "publishing_retry_claimable": publishing_retry_claimable,
+            "publishing_retry_due_blocked": publishing_retry_due_blocked,
+            "publishing_retry_backoff_blocked": publishing_retry_backoff_blocked,
+            "publishing_retry_lease_blocked": publishing_retry_lease_blocked,
+            "eligible_total": eligible_total,
+        }
+
+    @staticmethod
+    def _is_retry_due(*, task: Task, now: datetime) -> bool:
+        if task.retry_count <= 0:
+            return True
+        if task.next_attempt_at is None:
+            return True
+        return task.next_attempt_at <= now
+
+    @staticmethod
+    def _is_lease_available(*, task: Task, now: datetime) -> bool:
+        if task.lease_until is None:
+            return True
+        return task.lease_until <= now
+
+    @staticmethod
+    def _is_schedule_due(*, task: Task, now: datetime) -> bool:
+        if task.scheduled_publish_at is None:
+            return True
+        return task.scheduled_publish_at <= now
 
     def _acquire_task_lease(self, *, task_id: int, worker_id: str) -> None:
         now = datetime.now().replace(tzinfo=None)

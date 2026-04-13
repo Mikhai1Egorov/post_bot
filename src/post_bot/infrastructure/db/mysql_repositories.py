@@ -1228,6 +1228,20 @@ class MySQLApprovalBatchRepository(_BaseMySQLRepository):
             return None
         return self._map_batch(row)
 
+    def find_active_by_user(self, user_id: int) -> ApprovalBatchRecord | None:
+        row = self._fetchone(
+            self._select_batch_base_sql()
+            + " WHERE b.user_id = %s AND b.batch_status IN (%s, %s) ORDER BY b.id DESC LIMIT 1",
+            (
+                user_id,
+                ApprovalBatchStatus.READY.value,
+                ApprovalBatchStatus.USER_NOTIFIED.value,
+            ),
+        )
+        if row is None:
+            return None
+        return self._map_batch(row)
+
     def list_expirable_ids(
         self,
         *,

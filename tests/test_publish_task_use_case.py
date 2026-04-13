@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from datetime import datetime, timedelta
 import logging
 import sys
 from pathlib import Path
@@ -47,7 +48,13 @@ class PublishTaskUseCaseTests(unittest.TestCase):
         return upload.id
 
     @staticmethod
-    def _task(*, upload_id: int, status: TaskStatus = TaskStatus.PUBLISHING, mode: str = "instant") -> Task:
+    def _task(
+        *,
+        upload_id: int,
+        status: TaskStatus = TaskStatus.PUBLISHING,
+        mode: str = "instant",
+        scheduled_publish_at: datetime | None = None,
+    ) -> Task:
         return Task(
             id=1,
             upload_id=upload_id,
@@ -64,7 +71,7 @@ class PublishTaskUseCaseTests(unittest.TestCase):
             include_image_flag=False,
             footer_text=None,
             footer_link_url=None,
-            scheduled_publish_at=None,
+            scheduled_publish_at=scheduled_publish_at,
             publish_mode=mode,
             article_cost=1,
             billing_state=TaskBillingState.RESERVED,
@@ -388,6 +395,64 @@ class PublishTaskUseCaseTests(unittest.TestCase):
         self.assertEqual(result.error_code, "PUBLISH_BOT_NOT_IN_CHANNEL")
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.FAILED)
         self.assertEqual(uow.tasks.tasks[1].retry_count, 0)
+
+    def test_publish_instant_future_schedule_is_deferred_without_sending(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload_id = self._create_processing_upload(uow)
+        scheduled_at = datetime.now().replace(tzinfo=None) + timedelta(minutes=7)
+        uow.tasks.create_many(
+            [
+                self._task(
+                    upload_id=upload_id,
+                    status=TaskStatus.PUBLISHING,
+                    mode="instant",
+                    scheduled_publish_at=scheduled_at,
+                )
+            ]
+        )
+        self._seed_successful_render(uow, task_id=1)
+
+        publisher = FakePublisher(external_message_id="msg-should-not-send")
+        use_case = PublishTaskUseCase(uow=uow, publisher=publisher, logger=logging.getLogger("test.publish"))
+
+        result = use_case.execute(PublishTaskCommand(task_id=1, changed_by="worker-1"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.task_status, TaskStatus.PUBLISHING)
+        self.assertEqual(len(publisher.calls), 0)
+        self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.PUBLISHING)
+        self.assertEqual(uow.tasks.tasks[1].last_error_message, "PUBLISH_DEFERRED_UNTIL_SCHEDULE")
+        self.assertEqual(uow.tasks.tasks[1].retry_count, 1)
+        self.assertEqual(uow.tasks.tasks[1].next_attempt_at, scheduled_at)
+        self.assertIsNone(uow.tasks.tasks[1].claimed_by)
+        self.assertIsNone(uow.tasks.tasks[1].lease_until)
+        self.assertIsNone(uow.publications.get_latest_for_task(1))
+
+    def test_publish_approval_future_schedule_is_not_deferred(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload_id = self._create_processing_upload(uow)
+        scheduled_at = datetime.now().replace(tzinfo=None) + timedelta(minutes=7)
+        uow.tasks.create_many(
+            [
+                self._task(
+                    upload_id=upload_id,
+                    status=TaskStatus.READY_FOR_APPROVAL,
+                    mode="approval",
+                    scheduled_publish_at=scheduled_at,
+                )
+            ]
+        )
+        self._seed_successful_render(uow, task_id=1)
+
+        publisher = FakePublisher(external_message_id="msg-42", payload={"provider": "fake", "ok": True})
+        use_case = PublishTaskUseCase(uow=uow, publisher=publisher, logger=logging.getLogger("test.publish"))
+
+        result = use_case.execute(PublishTaskCommand(task_id=1, changed_by="user-1"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.task_status, TaskStatus.DONE)
+        self.assertEqual(len(publisher.calls), 1)
+        self.assertEqual(publisher.calls[0]["scheduled_for"], scheduled_at.isoformat())
 
     def test_publish_invalid_task_status_does_not_force_failed(self) -> None:
         uow = InMemoryUnitOfWork()

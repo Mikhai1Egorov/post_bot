@@ -7,7 +7,6 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from post_bot.application.use_cases.build_approval_batch import BuildApprovalBatchCommand, BuildApprovalBatchUseCase  # noqa: E402
 from post_bot.application.use_cases.download_approval_batch import DownloadApprovalBatchUseCase  # noqa: E402
 from post_bot.application.use_cases.handle_approval_action import (  # noqa: E402
     HandleApprovalActionCommand,
@@ -16,16 +15,11 @@ from post_bot.application.use_cases.handle_approval_action import (  # noqa: E40
 from post_bot.application.use_cases.publish_approval_batch import PublishApprovalBatchUseCase  # noqa: E402
 from post_bot.application.use_cases.publish_task import PublishTaskUseCase  # noqa: E402
 from post_bot.domain.models import Task  # noqa: E402
-from post_bot.infrastructure.testing.in_memory import (  # noqa: E402
-    FakePublisher,
-    InMemoryFileStorage,
-    InMemoryUnitOfWork,
-    InMemoryZipBuilder,
-)
+from post_bot.infrastructure.testing.in_memory import FakePublisher, InMemoryFileStorage, InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import ApprovalBatchStatus, ArtifactType, TaskBillingState, TaskStatus, UploadStatus  # noqa: E402
 
-class HandleApprovalActionUseCaseTests(unittest.TestCase):
 
+class HandleApprovalActionUseCaseTests(unittest.TestCase):
     @staticmethod
     def _task(task_id: int, upload_id: int, *, status: TaskStatus = TaskStatus.READY_FOR_APPROVAL) -> Task:
         return Task(
@@ -64,15 +58,15 @@ class HandleApprovalActionUseCaseTests(unittest.TestCase):
             html_storage_path=f"memory://artifacts/{task_id}/task_{task_id}.html",
         )
 
-    def test_routes_download_action(self) -> None:
+    def test_routes_download_action_for_single_batch_task(self) -> None:
         uow = InMemoryUnitOfWork()
         storage = InMemoryFileStorage()
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
         uow.tasks.create_many([self._task(1, upload.id), self._task(2, upload.id)])
 
+        html = b"<article><h1>Title</h1></article>"
         for task_id in (1, 2):
-            html = f"<article><h1>Title {task_id}</h1></article>".encode("utf-8")
             html_path = storage.save_task_artifact(
                 task_id=task_id,
                 artifact_type=ArtifactType.HTML,
@@ -90,15 +84,26 @@ class HandleApprovalActionUseCaseTests(unittest.TestCase):
                 is_final=True,
             )
 
-        build = BuildApprovalBatchUseCase(
-            uow=uow,
-            file_storage=storage,
-            artifact_storage=storage,
-            zip_builder=InMemoryZipBuilder(),
-            logger=logging.getLogger("test.handle_action.build"),
+        zip_path = storage.save_task_artifact(
+            task_id=None,
+            artifact_type=ArtifactType.ZIP,
+            file_name="upload_1_approval_batch.zip",
+            content=b"zip",
         )
-        build_result = build.execute(BuildApprovalBatchCommand(upload_id=upload.id))
-        self.assertTrue(build_result.success)
+        batch = uow.approval_batches.create_ready(upload_id=upload.id, user_id=20)
+        uow.approval_batch_items.add_items(batch_id=batch.id, task_ids=[1, 2])
+        zip_artifact = uow.artifacts.add_artifact(
+            task_id=None,
+            upload_id=upload.id,
+            artifact_type=ArtifactType.ZIP,
+            storage_path=zip_path,
+            file_name="upload_1_approval_batch.zip",
+            mime_type="application/zip",
+            size_bytes=3,
+            is_final=True,
+        )
+        uow.approval_batches.set_zip_artifact(batch.id, zip_artifact.id)
+        uow.approval_batches.set_status(batch.id, ApprovalBatchStatus.USER_NOTIFIED)
 
         publish_uc = PublishApprovalBatchUseCase(
             uow=uow,
@@ -113,16 +118,15 @@ class HandleApprovalActionUseCaseTests(unittest.TestCase):
         handle = HandleApprovalActionUseCase(publish_use_case=publish_uc, download_use_case=download_uc)
 
         result = handle.execute(
-            HandleApprovalActionCommand(action="download", batch_id=build_result.batch_id, user_id=20, changed_by="user")
+            HandleApprovalActionCommand(action="download", batch_id=batch.id, user_id=20, changed_by="user")
         )
 
         self.assertTrue(result.success)
         self.assertIsNone(result.error_code)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.DONE)
-        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.DONE)
-        self.assertEqual(uow.uploads.uploads[upload.id].upload_status, UploadStatus.COMPLETED)
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.READY_FOR_APPROVAL)
 
-    def test_routes_publish_action(self) -> None:
+    def test_routes_publish_action_for_single_batch_task(self) -> None:
         uow = InMemoryUnitOfWork()
         upload = uow.uploads.create_received(user_id=20, original_filename="tasks.xlsx", storage_path="memory://upload.xlsx")
         uow.uploads.set_upload_status(upload.id, UploadStatus.PROCESSING)
@@ -153,8 +157,8 @@ class HandleApprovalActionUseCaseTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertIsNone(result.error_code)
         self.assertEqual(uow.tasks.tasks[1].task_status, TaskStatus.DONE)
-        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.DONE)
-        self.assertEqual(uow.uploads.uploads[upload.id].upload_status, UploadStatus.COMPLETED)
+        self.assertEqual(uow.tasks.tasks[2].task_status, TaskStatus.READY_FOR_APPROVAL)
+
 
 if __name__ == "__main__":
     unittest.main()
