@@ -9,10 +9,12 @@ from post_bot.application.use_cases.download_approval_batch import (
     DownloadApprovalBatchCommand,
     DownloadApprovalBatchUseCase,
 )
+
 from post_bot.application.use_cases.publish_approval_batch import (
     PublishApprovalBatchCommand,
     PublishApprovalBatchUseCase,
 )
+
 from post_bot.shared.errors import BusinessRuleError
 
 ApprovalActionCode = Literal["publish", "download"]
@@ -30,7 +32,6 @@ class HandleApprovalActionResult:
     batch_id: int
     success: bool
     error_code: str | None
-
 
 class HandleApprovalActionUseCase:
     """Routes approval user action to the dedicated use-case."""

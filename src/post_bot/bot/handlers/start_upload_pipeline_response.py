@@ -16,14 +16,8 @@ def build_start_upload_pipeline_response(language: InterfaceLanguage, result: St
 
     if result.status == "insufficient_balance":
         lines = [
-            get_message(
-                language,
-                "INSUFFICIENT_BALANCE_WITH_COUNTS",
-                required=result.required_articles_count,
-                available=result.available_articles_count,
-            ),
-            "",
-            get_message(language, "UPLOAD_PROMPT"),
+            get_message(language, "UPLOAD_LIMIT_EXCEEDED"),
+            get_message(language, "UPLOAD_LIMIT_REMAINING_POSTS", available=result.available_articles_count),
         ]
         return "\n".join(lines)
 

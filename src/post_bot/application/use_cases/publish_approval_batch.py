@@ -13,14 +13,12 @@ from post_bot.shared.enums import ApprovalBatchStatus, TaskStatus, UserActionTyp
 from post_bot.shared.errors import AppError, BusinessRuleError, InternalError
 from post_bot.shared.logging import TimedLog, log_event
 
-
 @dataclass(slots=True, frozen=True)
 class PublishApprovalBatchCommand:
     batch_id: int
     user_id: int
     changed_by: str = "user"
     action_payload_json: dict[str, Any] | None = None
-
 
 @dataclass(slots=True, frozen=True)
 class PublishApprovalBatchResult:
@@ -29,7 +27,6 @@ class PublishApprovalBatchResult:
     published_task_ids: tuple[int, ...]
     failed_task_ids: tuple[int, ...]
     error_code: str | None
-
 
 class PublishApprovalBatchUseCase:
     """Publishes all tasks from approval batch using task-level publish flow."""
@@ -51,12 +48,14 @@ class PublishApprovalBatchUseCase:
         try:
             with self._uow:
                 batch = self._uow.approval_batches.get_by_id_for_update(command.batch_id)
+
                 if batch is None:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_NOT_FOUND",
                         message="Approval batch does not exist.",
                         details={"batch_id": command.batch_id},
                     )
+
                 if batch.user_id != command.user_id:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_FORBIDDEN",
@@ -67,6 +66,7 @@ class PublishApprovalBatchUseCase:
                             "owner_user_id": batch.user_id,
                         },
                     )
+
                 if batch.batch_status == ApprovalBatchStatus.PUBLISHED:
                     self._uow.commit()
                     return PublishApprovalBatchResult(
@@ -76,12 +76,14 @@ class PublishApprovalBatchUseCase:
                         failed_task_ids=tuple(),
                         error_code=None,
                     )
+
                 if batch.batch_status == ApprovalBatchStatus.DOWNLOADED:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_ALREADY_DOWNLOADED",
                         message="Downloaded approval batch cannot be published.",
                         details={"batch_id": command.batch_id},
                     )
+
                 if batch.batch_status == ApprovalBatchStatus.EXPIRED:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_EXPIRED",
@@ -90,6 +92,7 @@ class PublishApprovalBatchUseCase:
                     )
 
                 task_ids = self._uow.approval_batch_items.list_task_ids(batch.id)
+
                 if not task_ids:
                     raise InternalError(
                         code="APPROVAL_BATCH_ITEMS_EMPTY",
@@ -115,6 +118,7 @@ class PublishApprovalBatchUseCase:
             with self._uow:
                 task = self._uow.tasks.get_by_id_for_update(task_id)
                 self._uow.commit()
+
             if task is None:
                 failed_task_ids.append(task_id)
                 first_failed_error_code = "APPROVAL_TASK_NOT_FOUND"
@@ -127,15 +131,18 @@ class PublishApprovalBatchUseCase:
                 task_result = self._publish_task_use_case.execute(
                     PublishTaskCommand(task_id=task_id, changed_by=command.changed_by)
                 )
+
                 if task_result.success:
                     published_task_ids.append(task_id)
                 else:
                     failed_task_ids.append(task_id)
+
                     if task_result.error_code is not None:
                         first_failed_error_code = task_result.error_code
 
             with self._uow:
                 batch_for_update = self._uow.approval_batches.get_by_id_for_update(command.batch_id)
+
                 if batch_for_update is None:
                     raise InternalError(
                         code="APPROVAL_BATCH_NOT_FOUND_AFTER_PUBLISH",
@@ -172,6 +179,7 @@ class PublishApprovalBatchUseCase:
                     "first_failed_error_code": first_failed_error_code,
                 },
             )
+
             batch_error_code = (
                 None
                 if not failed_task_ids

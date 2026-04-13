@@ -29,13 +29,11 @@ class RecoverStaleTasksCommand:
     allow_bulk_status_recovery: bool = False
     changed_by: str = "system_recovery"
 
-
 @dataclass(slots=True, frozen=True)
 class RecoverStaleTasksResult:
     scanned_count: int
     recovered_count: int
     recovered_task_ids: tuple[int, ...]
-
 
 class RecoverStaleTasksUseCase:
     """Marks stale in-progress tasks as FAILED for deterministic recovery."""
@@ -48,24 +46,30 @@ class RecoverStaleTasksUseCase:
         timer = TimedLog()
 
         with self._uow:
+
             if command.task_ids is not None:
                 candidates = []
+
                 for task_id in command.task_ids:
                     task = self._uow.tasks.get_by_id_for_update(task_id)
+
                     if task is not None:
                         candidates.append(task)
                 strategy = "explicit_task_ids"
             else:
+
                 if not command.statuses:
                     raise BusinessRuleError(
                         code="RECOVERY_STATUSES_EMPTY",
                         message="At least one recoverable status is required.",
                     )
+
                 if not command.allow_bulk_status_recovery:
                     raise BusinessRuleError(
                         code="RECOVERY_BULK_BY_STATUS_DISABLED",
                         message="Bulk status recovery is disabled. Provide explicit task_ids.",
                     )
+
                 candidates = self._uow.tasks.list_by_statuses(command.statuses)
                 strategy = "bulk_statuses"
 
@@ -73,6 +77,7 @@ class RecoverStaleTasksUseCase:
             touched_upload_ids: set[int] = set()
 
             for task in candidates:
+
                 if task.task_status not in command.statuses:
                     continue
 

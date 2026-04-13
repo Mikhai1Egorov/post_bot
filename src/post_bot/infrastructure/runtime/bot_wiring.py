@@ -105,6 +105,7 @@ def build_bot_wiring(
             logger=logger.getChild("release_upload_reservation"),
         ),
         logger=logger.getChild("start_upload_pipeline"),
+        get_available_posts=get_available_posts,
     )
 
     effective_publisher = publisher or LocalArtifactPublisher()

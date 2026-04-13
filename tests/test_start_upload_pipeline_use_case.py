@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from post_bot.application.use_cases.create_tasks import TaskCreationUseCase  # noqa: E402
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsResult  # noqa: E402
 from post_bot.application.use_cases.release_upload_reservation import ReleaseUploadReservationUseCase  # noqa: E402
 from post_bot.application.use_cases.reserve_balance import ReserveBalanceUseCase  # noqa: E402
 from post_bot.application.use_cases.start_upload_pipeline import (  # noqa: E402
@@ -32,6 +33,7 @@ class StartUploadPipelineUseCaseTests(unittest.TestCase):
         storage: InMemoryFileStorage,
         parser: FakeExcelTaskParser,
         create_tasks: TaskCreationUseCase | None = None,
+        get_available_posts: object | None = None,
     ) -> StartUploadPipelineUseCase:
         return StartUploadPipelineUseCase(
             intake=UploadIntakeUseCase(uow=uow, file_storage=storage, logger=logging.getLogger("test.start.intake")),
@@ -49,6 +51,7 @@ class StartUploadPipelineUseCaseTests(unittest.TestCase):
                 logger=logging.getLogger("test.start.release"),
             ),
             logger=logging.getLogger("test.start.pipeline"),
+            get_available_posts=get_available_posts,  # type: ignore[arg-type]
         )
 
     def test_pipeline_starts_processing(self) -> None:
@@ -152,6 +155,62 @@ class StartUploadPipelineUseCaseTests(unittest.TestCase):
         self.assertEqual(result.status, "insufficient_balance")
         self.assertEqual(result.billing_status, UploadBillingStatus.REJECTED)
         self.assertEqual(result.tasks_created, 0)
+
+    def test_pipeline_stops_early_when_requested_posts_exceed_remaining_limit(self) -> None:
+        class _FixedAvailablePostsUseCase:
+            def execute(self, command):  # noqa: ANN001
+                return GetAvailablePostsResult(user_id=command.user_id, available_posts_count=1)
+
+        uow = InMemoryUnitOfWork()
+        storage = InMemoryFileStorage()
+        parser = FakeExcelTaskParser(
+            ParsedExcelData(
+                headers=("channel", "title", "keywords", "response_language", "mode"),
+                rows=(
+                    ParsedExcelRow(
+                        excel_row=2,
+                        values={
+                            "channel": "@news",
+                            "title": "First",
+                            "keywords": "ai",
+                            "response_language": "en",
+                            "mode": "instant",
+                        },
+                    ),
+                    ParsedExcelRow(
+                        excel_row=3,
+                        values={
+                            "channel": "@news",
+                            "title": "Second",
+                            "keywords": "ml",
+                            "response_language": "en",
+                            "mode": "instant",
+                        },
+                    ),
+                ),
+            )
+        )
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=77, available_articles_count=10, reserved_articles_count=0, consumed_articles_total=0)
+        )
+
+        use_case = self._build_use_case(
+            uow=uow,
+            storage=storage,
+            parser=parser,
+            get_available_posts=_FixedAvailablePostsUseCase(),
+        )
+        result = use_case.execute(
+            StartUploadPipelineCommand(user_id=77, original_filename="tasks.xlsx", payload=b"bytes")
+        )
+
+        self.assertEqual(result.status, "insufficient_balance")
+        self.assertEqual(result.billing_status, UploadBillingStatus.REJECTED)
+        self.assertEqual(result.tasks_created, 0)
+        self.assertEqual(result.required_articles_count, 2)
+        self.assertEqual(result.available_articles_count, 1)
+        self.assertEqual(result.insufficient_by, 1)
+        self.assertEqual(len(uow.tasks.tasks), 0)
 
     def test_pipeline_releases_reservation_when_task_creation_fails(self) -> None:
         class _FailingCreateTasksUseCase:

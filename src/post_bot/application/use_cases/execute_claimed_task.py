@@ -9,12 +9,12 @@ from post_bot.application.use_cases.heartbeat_task_lease import (
     HeartbeatTaskLeaseCommand,
     HeartbeatTaskLeaseUseCase,
 )
+
 from post_bot.application.use_cases.publish_task import PublishTaskCommand, PublishTaskUseCase
 from post_bot.application.use_cases.run_task_generation import RunTaskGenerationCommand, RunTaskGenerationUseCase
 from post_bot.application.use_cases.run_task_rendering import RunTaskRenderingCommand, RunTaskRenderingUseCase
 from post_bot.shared.enums import TaskStatus
 from post_bot.shared.logging import TimedLog, log_event
-
 
 @dataclass(slots=True, frozen=True)
 class ExecuteClaimedTaskCommand:
@@ -23,7 +23,6 @@ class ExecuteClaimedTaskCommand:
     claimed_status: TaskStatus
     changed_by: str = "system"
 
-
 @dataclass(slots=True, frozen=True)
 class ExecuteClaimedTaskResult:
     task_id: int
@@ -31,7 +30,6 @@ class ExecuteClaimedTaskResult:
     final_status: TaskStatus
     stage: str
     error_code: str | None
-
 
 class ExecuteClaimedTaskUseCase:
     """Runs generation -> rendering -> publish branch for one claimed task."""
@@ -83,6 +81,7 @@ class ExecuteClaimedTaskUseCase:
                 changed_by=command.changed_by,
             )
         )
+
         if not generation.success:
             return ExecuteClaimedTaskResult(
                 task_id=command.task_id,
@@ -96,6 +95,7 @@ class ExecuteClaimedTaskUseCase:
         rendering = self._run_rendering.execute(
             RunTaskRenderingCommand(task_id=command.task_id, changed_by=command.changed_by)
         )
+
         if not rendering.success:
             return ExecuteClaimedTaskResult(
                 task_id=command.task_id,

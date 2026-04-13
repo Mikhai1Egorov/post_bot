@@ -66,6 +66,7 @@ class CleanupNonFinalArtifactsUseCase:
             duration_ms=timer.elapsed_ms(),
             extra={"scanned_count": len(candidates), "deleted_count": len(deleted_ids)},
         )
+
         return CleanupNonFinalArtifactsResult(
             scanned_count=len(candidates),
             deleted_count=len(deleted_ids),

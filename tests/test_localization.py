@@ -58,6 +58,8 @@ class LocalizationTests(unittest.TestCase):
             "VALIDATION_REUPLOAD_HINT",
             "INSUFFICIENT_BALANCE",
             "INSUFFICIENT_BALANCE_WITH_COUNTS",
+            "UPLOAD_LIMIT_EXCEEDED",
+            "UPLOAD_LIMIT_REMAINING_POSTS",
             "PROCESSING_STARTED",
         }
         for language in InterfaceLanguage:
@@ -85,6 +87,19 @@ class LocalizationTests(unittest.TestCase):
         message = get_message(InterfaceLanguage.RU, "SYSTEM_READY")
         self.assertTrue(isinstance(message, str))
         self.assertNotEqual(message.strip(), "")
+
+    def test_available_posts_is_localized_for_non_english_languages(self) -> None:
+        for language in (
+            InterfaceLanguage.RU,
+            InterfaceLanguage.UK,
+            InterfaceLanguage.ES,
+            InterfaceLanguage.ZH,
+            InterfaceLanguage.HI,
+            InterfaceLanguage.AR,
+        ):
+            with self.subTest(language=language.value):
+                message = get_message(language, "AVAILABLE_POSTS", available=0)
+                self.assertNotEqual(message, "Available posts count: 0.")
 
 
 if __name__ == "__main__":

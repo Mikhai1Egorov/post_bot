@@ -35,6 +35,7 @@ class MarkApprovalBatchNotifiedUseCase:
         try:
             with self._uow:
                 batch = self._uow.approval_batches.get_by_id_for_update(command.batch_id)
+
                 if batch is None:
                     raise BusinessRuleError(
                         code="APPROVAL_BATCH_NOT_FOUND",
@@ -43,6 +44,7 @@ class MarkApprovalBatchNotifiedUseCase:
                     )
 
                 status_before = batch.batch_status
+
                 if batch.batch_status in {
                     ApprovalBatchStatus.PUBLISHED,
                     ApprovalBatchStatus.DOWNLOADED,

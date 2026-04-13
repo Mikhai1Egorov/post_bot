@@ -55,6 +55,7 @@ class PublishTaskUseCase:
         try:
             with self._uow:
                 task = self._uow.tasks.get_by_id_for_update(command.task_id)
+
                 if task is None:
                     raise BusinessRuleError(
                         code="TASK_NOT_FOUND",
@@ -67,7 +68,9 @@ class PublishTaskUseCase:
                     task.id,
                     PublicationStatus.PUBLISHED,
                 )
+
                 if existing_publication is not None:
+
                     if task.task_status != TaskStatus.DONE:
                         transition_task_status(
                             uow=self._uow,
@@ -91,6 +94,7 @@ class PublishTaskUseCase:
                     task.id,
                     PublicationStatus.PENDING,
                 )
+
                 if existing_pending_publication is not None:
                     self._uow.commit()
                     log_event(
@@ -117,6 +121,7 @@ class PublishTaskUseCase:
                     )
 
                 latest_publication = self._uow.publications.get_latest_for_task(task.id)
+
                 if (
                     latest_publication is not None
                     and latest_publication.publication_status == PublicationStatus.FAILED
@@ -133,6 +138,7 @@ class PublishTaskUseCase:
                         reason="approval_publish_started",
                     )
                     task = self._uow.tasks.get_by_id_for_update(command.task_id)
+
                     if task is None:
                         raise InternalError(
                             code="TASK_NOT_FOUND_AFTER_PUBLISHING",
@@ -148,6 +154,7 @@ class PublishTaskUseCase:
                     )
 
                 now = datetime.now().replace(tzinfo=None)
+
                 if (
                     task.publish_mode == "instant"
                     and task.scheduled_publish_at is not None
@@ -192,6 +199,7 @@ class PublishTaskUseCase:
                     )
 
                 render = self._uow.renders.get_by_task_id(task.id)
+
                 if render is None or render.render_status != RenderStatus.SUCCEEDED or not render.body_html:
                     raise BusinessRuleError(
                         code="RENDER_NOT_READY",
@@ -226,6 +234,7 @@ class PublishTaskUseCase:
                 ) from error
 
             with self._uow:
+
                 if publication_id is None:
                     raise InternalError(
                         code="PUBLICATION_ID_MISSING",
@@ -252,6 +261,7 @@ class PublishTaskUseCase:
                 "task_id": task.id,
                 "publication_id": publication_id,
             }
+
             if isinstance(payload, dict):
                 publish_trace.update(
                     {
@@ -308,6 +318,7 @@ class PublishTaskUseCase:
 
         with self._uow:
             task = self._uow.tasks.get_by_id_for_update(command.task_id)
+
             if task is None:
                 raise InternalError(
                     code="TASK_NOT_FOUND_ON_PUBLISH_FAILURE",
@@ -328,6 +339,7 @@ class PublishTaskUseCase:
             queue_for_retry = False
             retry_count = task.retry_count
             next_attempt_at: datetime | None = None
+
             if task.task_status == TaskStatus.PUBLISHING:
                 retry_count = task.retry_count + 1 if error.retryable else task.retry_count
                 queue_for_retry = error.retryable and retry_count <= TASK_MAX_RETRY_ATTEMPTS
@@ -338,6 +350,7 @@ class PublishTaskUseCase:
                     last_error_message=f"{error.code}: {error.message}",
                     next_attempt_at=next_attempt_at,
                 )
+
                 if queue_for_retry:
                     # Keep task in delivery stage; worker will resume publish-only path.
                     self._uow.tasks.set_task_status(
@@ -417,8 +430,10 @@ class PublishTaskUseCase:
         resume_payload_json: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         payload = error.details.get("publisher_payload_json")
+
         if isinstance(payload, dict):
             return payload
+
         if isinstance(resume_payload_json, dict):
             return resume_payload_json
         return None
@@ -432,6 +447,7 @@ class PublishTaskUseCase:
     ) -> dict[str, object | None]:
         details = error.details if isinstance(error.details, dict) else {}
         payload = cls._resolve_failure_payload_json(error=error, resume_payload_json=resume_payload_json)
+
         if not isinstance(payload, dict):
             payload = {}
 
@@ -441,6 +457,7 @@ class PublishTaskUseCase:
 
         status_raw = details.get("status")
         status: int | None = None
+
         if status_raw is not None:
             try:
                 status = int(status_raw)
@@ -492,6 +509,7 @@ class PublishTaskUseCase:
         reason: str | None,
         method: str | None,
     ) -> bool:
+
         if status != 409:
             return False
         haystack = " ".join(part for part in (body, reason, method) if part is not None).casefold()
@@ -514,6 +532,7 @@ class PublishTaskUseCase:
             status = int(status_raw) if status_raw is not None else 0
         except (TypeError, ValueError):
             status = 0
+
         if status != 400:
             return False
 
@@ -525,4 +544,3 @@ class PublishTaskUseCase:
             or "chat not found" in reason_text
             or "chat not found" in message_text
         )
-

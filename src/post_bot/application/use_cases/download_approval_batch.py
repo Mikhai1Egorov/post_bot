@@ -13,14 +13,12 @@ from post_bot.shared.enums import ApprovalBatchStatus, PublicationStatus, TaskSt
 from post_bot.shared.errors import AppError, BusinessRuleError, InternalError
 from post_bot.shared.logging import TimedLog, log_event
 
-
 @dataclass(slots=True, frozen=True)
 class DownloadApprovalBatchCommand:
     batch_id: int
     user_id: int
     changed_by: str = "user"
     action_payload_json: dict[str, Any] | None = None
-
 
 @dataclass(slots=True, frozen=True)
 class DownloadApprovalBatchResult:
@@ -30,7 +28,6 @@ class DownloadApprovalBatchResult:
     zip_storage_path: str | None
     zip_file_name: str | None
     error_code: str | None
-
 
 class DownloadApprovalBatchUseCase:
     """Marks approval tasks as downloaded and returns ZIP archive pointer."""

@@ -15,6 +15,7 @@ from post_bot.bot.handlers.language_selection import (  # noqa: E402
 )
 from post_bot.infrastructure.testing.in_memory import InMemoryUnitOfWork  # noqa: E402
 from post_bot.shared.enums import InterfaceLanguage  # noqa: E402
+from post_bot.shared.localization import get_message  # noqa: E402
 
 
 class LanguageSelectionHandlerTests(unittest.TestCase):
@@ -35,7 +36,10 @@ class LanguageSelectionHandlerTests(unittest.TestCase):
         self.assertEqual(result.user_id, 1)
         self.assertTrue(result.created)
         self.assertEqual(result.interface_language, InterfaceLanguage.ES)
-        self.assertIn("Available posts count: 33.", result.response_text)
+        self.assertIn(
+            get_message(InterfaceLanguage.ES, "AVAILABLE_POSTS", available=33),
+            result.response_text,
+        )
         self.assertIn("Sube tu archivo Excel.", result.response_text)
 
     def test_handle_updates_existing_user_language(self) -> None:

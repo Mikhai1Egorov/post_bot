@@ -26,7 +26,7 @@ class StartUploadPipelineResponseHandlerTests(unittest.TestCase):
         text = build_start_upload_pipeline_response(InterfaceLanguage.EN, result)
         self.assertEqual(text, "Processing has started.")
 
-    def test_insufficient_balance_response_with_counts(self) -> None:
+    def test_insufficient_balance_response_with_remaining_limit(self) -> None:
         result = StartUploadPipelineResult(
             upload_id=1,
             status="insufficient_balance",
@@ -41,8 +41,8 @@ class StartUploadPipelineResponseHandlerTests(unittest.TestCase):
         )
 
         text = build_start_upload_pipeline_response(InterfaceLanguage.EN, result)
-        self.assertIn("Insufficient balance. Required: 5. Available: 2.", text)
-        self.assertIn("Please upload your Excel file.", text)
+        self.assertIn("Your number of posts is greater than the remaining limit.", text)
+        self.assertIn("You have 2 posts left.", text)
 
     def test_validation_failed_response_uses_structured_errors(self) -> None:
         result = StartUploadPipelineResult(

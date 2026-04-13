@@ -151,7 +151,8 @@ class UploadCommandHandlerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "insufficient_balance")
-        self.assertIn("Required: 1. Available: 0.", result.response_text)
+        self.assertIn("Your number of posts is greater than the remaining limit.", result.response_text)
+        self.assertIn("You have 0 posts left.", result.response_text)
 
 
 if __name__ == "__main__":

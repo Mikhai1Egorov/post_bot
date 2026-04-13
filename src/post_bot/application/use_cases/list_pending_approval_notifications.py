@@ -41,8 +41,10 @@ class ListPendingApprovalNotificationsUseCase:
                 ready_by_user.setdefault(task.user_id, []).append(task)
 
             notifications: list[PendingApprovalNotification] = []
+
             for user_id in sorted(ready_by_user.keys()):
                 user = self._uow.users.get_by_id_for_update(user_id)
+
                 if user is None:
                     log_event(
                         self._logger,
@@ -65,15 +67,20 @@ class ListPendingApprovalNotificationsUseCase:
                         extra={"user_id": user_id, "interface_language": user.interface_language},
                     )
                     continue
+
                 ready_tasks = ready_by_user[user_id]
+
                 if not ready_tasks:
                     continue
 
                 active_batch = self._uow.approval_batches.find_active_by_user(user_id)
+
                 if active_batch is not None:
                     active_task_ids = self._uow.approval_batch_items.list_task_ids(active_batch.id)
+
                     if active_task_ids:
                         active_task_id = active_task_ids[0]
+
                         if any(task.id == active_task_id for task in ready_tasks):
                             # There is already an active approval prompt for this user.
                             continue
@@ -87,6 +94,7 @@ class ListPendingApprovalNotificationsUseCase:
                         queue_count=len(ready_tasks),
                     )
                 )
+
                 if limit is not None and len(notifications) >= limit:
                     break
 

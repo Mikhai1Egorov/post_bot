@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from logging import Logger
 
 from post_bot.application.use_cases.create_tasks import TaskCreationCommand, TaskCreationUseCase
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsCommand, GetAvailablePostsUseCase
 from post_bot.application.use_cases.release_upload_reservation import (
     ReleaseUploadReservationCommand,
     ReleaseUploadReservationUseCase,
@@ -52,6 +53,7 @@ class StartUploadPipelineUseCase:
         create_tasks: TaskCreationUseCase,
         release_reservation: ReleaseUploadReservationUseCase,
         logger: Logger,
+        get_available_posts: GetAvailablePostsUseCase | None = None,
     ) -> None:
         self._intake = intake
         self._validate = validate
@@ -59,6 +61,7 @@ class StartUploadPipelineUseCase:
         self._create_tasks = create_tasks
         self._release_reservation = release_reservation
         self._logger = logger
+        self._get_available_posts = get_available_posts
 
     def execute(self, command: StartUploadPipelineCommand) -> StartUploadPipelineResult:
         timer = TimedLog()
@@ -84,6 +87,28 @@ class StartUploadPipelineUseCase:
                 required_articles_count=validate_result.required_articles_count,
                 available_articles_count=0,
                 insufficient_by=0,
+            )
+
+        precheck_available = self._resolve_available_posts_count(user_id=command.user_id)
+        if (
+            precheck_available is not None
+            and validate_result.required_articles_count > precheck_available
+        ):
+            reserve_result = self._reserve.execute(ReserveBalanceCommand(upload_id=intake_result.upload_id))
+            if reserve_result.billing_status == UploadBillingStatus.RESERVED:
+                self._release_reservation.execute(ReleaseUploadReservationCommand(upload_id=intake_result.upload_id))
+            return StartUploadPipelineResult(
+                upload_id=intake_result.upload_id,
+                status="insufficient_balance",
+                upload_status=UploadStatus.VALIDATED,
+                billing_status=UploadBillingStatus.REJECTED,
+                tasks_created=0,
+                task_ids=tuple(),
+                validation_errors_count=0,
+                validation_errors=tuple(),
+                required_articles_count=validate_result.required_articles_count,
+                available_articles_count=precheck_available,
+                insufficient_by=validate_result.required_articles_count - precheck_available,
             )
 
         reserve_result = self._reserve.execute(ReserveBalanceCommand(upload_id=intake_result.upload_id))
@@ -152,3 +177,9 @@ class StartUploadPipelineUseCase:
             available_articles_count=reserve_result.available_articles_count,
             insufficient_by=0,
         )
+
+    def _resolve_available_posts_count(self, *, user_id: int) -> int | None:
+        if self._get_available_posts is None:
+            return None
+        available = self._get_available_posts.execute(GetAvailablePostsCommand(user_id=user_id))
+        return max(0, int(available.available_posts_count))

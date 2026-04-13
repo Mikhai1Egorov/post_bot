@@ -10,10 +10,8 @@ from post_bot.domain.protocols.unit_of_work import UnitOfWork
 from post_bot.shared.enums import InterfaceLanguage, LedgerEntryType, UserActionType
 from post_bot.shared.logging import TimedLog, log_event
 
-
-WELCOME_BONUS_ARTICLES_COUNT = 33
-WELCOME_BONUS_NOTE_TEXT = "WELCOME_BONUS_33"
-
+WELCOME_BONUS_ARTICLES_COUNT = 14
+WELCOME_BONUS_NOTE_TEXT = "WELCOME_BONUS_14"
 
 def _is_duplicate_user_create_error(error: Exception) -> bool:
     errno = getattr(error, "errno", None)
@@ -32,7 +30,6 @@ def _is_duplicate_user_create_error(error: Exception) -> bool:
         "telegram_user_id",
     )
     return any(marker in message for marker in duplicate_markers)
-
 
 @dataclass(slots=True, frozen=True)
 class EnsureUserCommand:
