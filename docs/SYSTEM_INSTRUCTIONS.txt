@@ -1,0 +1,9 @@
+Write in {response_language} only.
+
+The text must be natural, clear, and easy to read.
+Avoid repetition and keep logical flow.
+
+Do not mention AI, generation, or how the text was created.
+Do not use meta phrases.
+
+Produce a structured article with headings and paragraphs.

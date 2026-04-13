@@ -1,0 +1,13 @@
+﻿Title: {title}
+Keywords: {keywords}
+
+Write a clear, structured article.
+
+Requirements:
+- Length: 1400–1800 characters (max 2000)
+- Style: neutral, journalistic
+- Be concise, avoid fluff
+- Use keywords naturally within the text
+- Structure the text into logical sections
+
+Output only the final article without any comments or explanations.
