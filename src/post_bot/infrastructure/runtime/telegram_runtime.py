@@ -86,6 +86,11 @@ CARD_PACKAGES_BY_COUNT: dict[int, str] = {
     posts_count: package_code
     for package_code, posts_count in STRIPE_PACKAGE_DEFINITIONS
 }
+PACKAGE_BADGE_BY_COUNT: dict[int, str] = {
+    14: "✨",
+    42: "🔥",
+    84: "💎",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -519,7 +524,7 @@ class TelegramPollingRuntime:
             if context.found and context.user_id is not None:
                 result = self._get_available_posts.execute(GetAvailablePostsCommand(user_id=context.user_id))
                 available_count = max(0, int(result.available_posts_count))
-            self._gateway.send_message(chat_id=chat_id, text=f"\u2705 {available_count}")
+            self._gateway.send_message(chat_id=chat_id, text=f"\U0001F7E2 {available_count}")
             return True
 
         self._send_language_prompt(chat_id)
@@ -750,8 +755,9 @@ class TelegramPollingRuntime:
                             "label": get_message(
                                 context.interface_language,
                                 "PAYMENT_STARS_PACKAGE_LABEL",
+                                badge=self._package_badge(posts_count),
                                 count=posts_count,
-                                price=stars_price,
+                                price=f"{stars_price:>4}",
                             ),
                             "amount": stars_price,
                         }
@@ -1264,7 +1270,7 @@ class TelegramPollingRuntime:
                 ],
                 [
                     {
-                        "text": f"\U0001F4D8 {get_message(language, 'BUTTON_HOW_TO_USE')}",
+                        "text": get_message(language, "BUTTON_HOW_TO_USE"),
                         "callback_data": "instructions",
                     }
                 ],
@@ -1393,7 +1399,13 @@ class TelegramPollingRuntime:
             "inline_keyboard": [
                 [
                     {
-                        "text": get_message(language, "PAYMENT_STARS_PACKAGE_LABEL", count=posts_count, price=stars_price),
+                        "text": get_message(
+                            language,
+                            "PAYMENT_STARS_PACKAGE_LABEL",
+                            badge=TelegramPollingRuntime._package_badge(posts_count),
+                            count=posts_count,
+                            price=f"{stars_price:>4}",
+                        ),
                         "callback_data": f"buy_stars_package:{posts_count}",
                     }
                 ]
@@ -1407,13 +1419,22 @@ class TelegramPollingRuntime:
             "inline_keyboard": [
                 [
                     {
-                        "text": get_message(language, "PAYMENT_CARD_PACKAGE_LABEL", count=posts_count),
+                        "text": get_message(
+                            language,
+                            "PAYMENT_CARD_PACKAGE_LABEL",
+                            badge=TelegramPollingRuntime._package_badge(posts_count),
+                            count=posts_count,
+                        ),
                         "callback_data": f"buy_card_package:{posts_count}",
                     }
                 ]
                 for posts_count in CARD_PACKAGE_OPTIONS
             ]
         }
+
+    @staticmethod
+    def _package_badge(posts_count: int) -> str:
+        return PACKAGE_BADGE_BY_COUNT.get(posts_count, "•")
 
     def _send_home_screen(
         self,

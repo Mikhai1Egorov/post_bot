@@ -631,7 +631,7 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(result.updates_failed, 0)
         self.assertEqual(result.updates_processed, 1)
         self.assertEqual(len(gateway.sent_messages), 1)
-        self.assertEqual(gateway.sent_messages[0]["text"], "\u2705 7")
+        self.assertEqual(gateway.sent_messages[0]["text"], "\U0001F7E2 7")
 
     def test_balance_command_returns_zero_when_balance_missing_or_non_positive(self) -> None:
         updates = [
@@ -682,9 +682,9 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(result.updates_failed, 0)
         self.assertEqual(result.updates_processed, 3)
         self.assertEqual(len(gateway.sent_messages), 3)
-        self.assertEqual(gateway.sent_messages[0]["text"], "\u2705 0")
-        self.assertEqual(gateway.sent_messages[1]["text"], "\u2705 0")
-        self.assertEqual(gateway.sent_messages[2]["text"], "\u2705 0")
+        self.assertEqual(gateway.sent_messages[0]["text"], "\U0001F7E2 0")
+        self.assertEqual(gateway.sent_messages[1]["text"], "\U0001F7E2 0")
+        self.assertEqual(gateway.sent_messages[2]["text"], "\U0001F7E2 0")
 
     def test_debounces_rapid_identical_callbacks(self) -> None:
         updates = [
@@ -1107,11 +1107,12 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [row[0]["text"] for row in rows],
             [
-                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", count=14, price=739),
-                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", count=42, price=1499),
-                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", count=84, price=2439),
+                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", badge="✨", count=14, price=" 739"),
+                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", badge="🔥", count=42, price="1499"),
+                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", badge="💎", count=84, price="2439"),
             ],
         )
+        self.assertEqual(len({len(row[0]["text"]) for row in rows}), 1)
 
     def test_buy_posts_card_callback_shows_three_card_packages_without_prices(self) -> None:
         updates = [
@@ -1144,11 +1145,12 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [row[0]["text"] for row in rows],
             [
-                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", count=14),
-                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", count=42),
-                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", count=84),
+                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", badge="✨", count=14),
+                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", badge="🔥", count=42),
+                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", badge="💎", count=84),
             ],
         )
+        self.assertEqual(len({len(row[0]["text"]) for row in rows}), 1)
         self.assertTrue(all("⭐" not in row[0]["text"] for row in rows))
 
     def test_buy_package_callbacks_route_to_invoice_and_card_checkout(self) -> None:
