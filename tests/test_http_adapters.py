@@ -297,6 +297,42 @@ class ExternalAdaptersTests(unittest.TestCase):
         self.assertEqual(error.details.get("status"), 409)
         self.assertIn("terminated by other getUpdates request", str(error.details.get("body")))
 
+    def test_telegram_http_gateway_set_my_commands_calls_set_my_commands_endpoint(self) -> None:
+        gateway = TelegramHttpGateway(bot_token="123:abc", timeout_seconds=5)
+        captured_url: dict[str, str] = {}
+        captured_payload: dict[str, object] = {}
+
+        def _capture(request, timeout=0.0):
+            _ = timeout
+            captured_url["url"] = request.full_url
+            body = getattr(request, "data", b"") or b"{}"
+            captured_payload.update(json.loads(body.decode("utf-8")))
+            return _RawHttpResponse(b'{"ok": true, "result": true}')
+
+        with patch("post_bot.infrastructure.telegram.http_gateway.urlopen", side_effect=_capture):
+            gateway.set_my_commands(
+                commands=[
+                    {"command": "start", "description": "Start bot"},
+                    {"command": "balance", "description": "Show balance"},
+                ]
+            )
+
+        self.assertTrue(captured_url["url"].endswith("/setMyCommands"))
+        self.assertIn("commands", captured_payload)
+        self.assertEqual(
+            captured_payload["commands"],
+            [
+                {"command": "start", "description": "Start bot"},
+                {"command": "balance", "description": "Show balance"},
+            ],
+        )
+
+    def test_telegram_http_gateway_set_my_commands_rejects_empty_list(self) -> None:
+        gateway = TelegramHttpGateway(bot_token="123:abc", timeout_seconds=5)
+        with self.assertRaises(ValidationError) as context:
+            gateway.set_my_commands(commands=[])
+        self.assertEqual(context.exception.code, "TELEGRAM_COMMANDS_EMPTY")
+
     def test_image_client_parses_b64_response(self) -> None:
         client = OpenAIImageClient(api_key="sk-test", model_name="gpt-image-1")
 

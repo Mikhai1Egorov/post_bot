@@ -9,10 +9,12 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from post_bot.domain.models import (
+    ArticlePackageRecord,
     ApprovalBatchItemRecord,
     ApprovalBatchRecord,
     BalanceSnapshot,
     LedgerEntry,
+    PaymentRecord,
     PublicationRecord,
     Task,
     TaskArtifactRecord,
@@ -101,6 +103,34 @@ class BalanceRepository(Protocol):
 
 class LedgerRepository(Protocol):
     def append_entry(self, entry: LedgerEntry) -> None: ...
+
+
+class PaymentRepository(Protocol):
+    def get_or_create_article_package(
+        self,
+        *,
+        package_code: str,
+        articles_qty: int,
+        price_amount: float | None,
+        currency_code: str | None,
+    ) -> ArticlePackageRecord: ...
+
+    def get_by_provider_payment_id_for_update(self, provider_payment_id: str) -> PaymentRecord | None: ...
+
+    def create_paid(
+        self,
+        *,
+        user_id: int,
+        package_id: int,
+        provider_code: str,
+        provider_payment_id: str,
+        provider_invoice_id: str | None,
+        amount_value: float | None,
+        currency_code: str | None,
+        purchased_articles_qty: int,
+        raw_payload_json: dict[str, Any] | None,
+        paid_at: datetime | None,
+    ) -> PaymentRecord: ...
 
 class TaskStatusHistoryRepository(Protocol):
     def append_entry(self, item: TaskStatusHistoryItem) -> None: ...

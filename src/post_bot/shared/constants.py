@@ -35,6 +35,18 @@ DEFAULT_INCLUDE_IMAGE: str = IncludeImageExcelValue.FALSE.value
 TASK_MAX_RETRY_ATTEMPTS: int = 3
 TASK_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 300)
 WORKER_TASK_LEASE_SECONDS: int = 120
+TELEGRAM_STARS_PROVIDER_CODE: str = "telegram_stars"
+TELEGRAM_STARS_CURRENCY_CODE: str = "XTR"
+TELEGRAM_STARS_PACKAGE_DEFINITIONS: tuple[tuple[str, int, int], ...] = (
+    ("ARTICLES_14", 14, 739),
+    ("ARTICLES_42", 42, 1499),
+    ("ARTICLES_84", 84, 2439),
+)
+STRIPE_PROVIDER_CODE: str = "stripe"
+STRIPE_PACKAGE_DEFINITIONS: tuple[tuple[str, int], ...] = tuple(
+    (package_code, posts_count)
+    for package_code, posts_count, _stars_price in TELEGRAM_STARS_PACKAGE_DEFINITIONS
+)
 MAX_INPUT_FIELD_CHARS: int = 200
 MAX_TOPIC_CHARS: int = MAX_INPUT_FIELD_CHARS
 MAX_TITLE_CHARS: int = MAX_INPUT_FIELD_CHARS

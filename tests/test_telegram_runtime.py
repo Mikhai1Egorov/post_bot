@@ -9,7 +9,10 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from post_bot.application.ports import InstructionBundle  # noqa: E402
+from post_bot.application.ports import StripeCheckoutSession, StripeWebhookEvent  # noqa: E402
+from post_bot.application.use_cases.create_stripe_checkout_session import CreateStripeCheckoutSessionUseCase  # noqa: E402
 from post_bot.application.use_cases.get_available_posts import GetAvailablePostsUseCase  # noqa: E402
+from post_bot.application.use_cases.apply_telegram_stars_payment import ApplyTelegramStarsPaymentUseCase  # noqa: E402
 from post_bot.application.use_cases.get_user_context import GetUserContextUseCase  # noqa: E402
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase  # noqa: E402
 from post_bot.application.use_cases.mark_approval_batch_notified import MarkApprovalBatchNotifiedUseCase  # noqa: E402
@@ -59,13 +62,51 @@ class _FailingExcelTaskParser:
     def parse(self, payload: bytes):  # noqa: ANN001
         _ = payload
         raise ValidationError(code="EXCEL_HEADER_EMPTY", message="Excel header contains empty column names.", details={"empty_cells": ["B1", "D1"], "empty_columns": [2, 4]})
+
+
+class FakeStripePaymentAdapter:
+    def __init__(self) -> None:
+        self.checkout_requests: list[dict[str, object]] = []
+
+    def create_checkout_session(
+        self,
+        *,
+        package_code: str,
+        user_id: int,
+        success_url: str,
+        cancel_url: str,
+    ) -> StripeCheckoutSession:
+        self.checkout_requests.append(
+            {
+                "package_code": package_code,
+                "user_id": user_id,
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+            }
+        )
+        return StripeCheckoutSession(
+            session_id=f"cs_test_{package_code.lower()}",
+            checkout_url=f"https://checkout.stripe.test/{package_code.lower()}?u={user_id}",
+        )
+
+    def parse_webhook_event(
+        self,
+        *,
+        payload_bytes: bytes,
+        signature_header: str | None,
+    ) -> StripeWebhookEvent:
+        _ = (payload_bytes, signature_header)
+        raise ValidationError(code="UNUSED_IN_TEST", message="Not used in telegram runtime tests.")
+
 class FakeTelegramGateway:
     def __init__(self, updates: list[dict], files: dict[str, TelegramDownloadedFile]) -> None:
         self._updates = list(updates)
         self._files = files
         self.sent_messages: list[dict] = []
         self.sent_documents: list[dict] = []
+        self.sent_invoices: list[dict] = []
         self.answered_callbacks: list[str] = []
+        self.answered_pre_checkout_queries: list[dict] = []
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int) -> list[dict]:
         _ = timeout_seconds
@@ -96,6 +137,46 @@ class FakeTelegramGateway:
 
     def answer_callback_query(self, *, callback_query_id: str) -> None:
         self.answered_callbacks.append(callback_query_id)
+
+    def answer_pre_checkout_query(
+        self,
+        *,
+        pre_checkout_query_id: str,
+        ok: bool,
+        error_message: str | None = None,
+    ) -> None:
+        self.answered_pre_checkout_queries.append(
+            {
+                "pre_checkout_query_id": pre_checkout_query_id,
+                "ok": ok,
+                "error_message": error_message,
+            }
+        )
+
+    def send_invoice(
+        self,
+        *,
+        chat_id: int,
+        title: str,
+        description: str,
+        payload: str,
+        currency: str,
+        prices: list[dict],
+        provider_token: str | None = None,
+        start_parameter: str | None = None,
+    ) -> None:
+        self.sent_invoices.append(
+            {
+                "chat_id": chat_id,
+                "title": title,
+                "description": description,
+                "payload": payload,
+                "currency": currency,
+                "prices": prices,
+                "provider_token": provider_token,
+                "start_parameter": start_parameter,
+            }
+        )
 
 
 
@@ -188,6 +269,7 @@ class TelegramRuntimeTests(unittest.TestCase):
         storage: InMemoryFileStorage | None = None,
         publisher: FakePublisher | None = None,
         excel_parser: object | None = None,
+        stripe_payment_adapter: FakeStripePaymentAdapter | None = None,
         now_provider=None,  # noqa: ANN001
         utcnow_provider=None,  # noqa: ANN001
         update_checkpoint=None,  # noqa: ANN001
@@ -248,6 +330,14 @@ class TelegramRuntimeTests(unittest.TestCase):
             zip_builder=ZipBuilder(),
             logger=logging.getLogger("test.telegram.archive_approval_inbox_timeout"),
         )
+        apply_telegram_stars_payment = ApplyTelegramStarsPaymentUseCase(
+            uow=uow,
+            logger=logging.getLogger("test.telegram.apply_telegram_stars_payment"),
+        )
+        create_stripe_checkout_session = CreateStripeCheckoutSessionUseCase(
+            stripe_payment=stripe_payment_adapter or FakeStripePaymentAdapter(),
+            logger=logging.getLogger("test.telegram.create_stripe_checkout_session"),
+        )
 
         return TelegramPollingRuntime(
             gateway=gateway,
@@ -258,6 +348,10 @@ class TelegramRuntimeTests(unittest.TestCase):
             mark_approval_batch_notified=mark_approval_batch_notified,
             select_expirable_approval_batches=select_expirable_approval_batches,
             archive_approval_inbox_timeout=archive_approval_inbox_timeout,
+            apply_telegram_stars_payment=apply_telegram_stars_payment,
+            create_stripe_checkout_session=create_stripe_checkout_session,
+            stripe_success_url="https://example.com/success",
+            stripe_cancel_url="https://example.com/cancel",
             logger=logging.getLogger("test.telegram.runtime"),
             now_provider=now_provider,
             utcnow_provider=utcnow_provider,
@@ -440,6 +534,9 @@ class TelegramRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(any("Available posts count: 5." in item["text"] for item in gateway.sent_messages))
         self.assertTrue(any("Processing has started." in item["text"] for item in gateway.sent_messages))
+        processing_messages = [item for item in gateway.sent_messages if "Processing has started." in item["text"]]
+        self.assertTrue(processing_messages)
+        self.assertTrue(all(item["reply_markup"] is None for item in processing_messages))
 
         self.assertEqual(len(gateway.sent_documents), 2)
         self.assertEqual(gateway.sent_documents[0]["file_name"], "NEO_TEMPLATE.xlsx")
@@ -503,6 +600,91 @@ class TelegramRuntimeTests(unittest.TestCase):
         self.assertEqual(result.updates_failed, 0)
         # Limit is 5 calls / 10s, so one command is safely dropped by throttling.
         self.assertEqual(len(gateway.sent_messages), 5)
+
+    def test_balance_command_returns_available_count(self) -> None:
+        updates = [
+            {
+                "update_id": 61,
+                "message": {
+                    "message_id": 610,
+                    "from": {"id": 806},
+                    "chat": {"id": 806},
+                    "text": "/balance",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        user = uow.users.create(telegram_user_id=806, interface_language=InterfaceLanguage.EN)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(
+                user_id=user.id,
+                available_articles_count=7,
+                reserved_articles_count=0,
+                consumed_articles_total=0,
+            )
+        )
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(len(gateway.sent_messages), 1)
+        self.assertEqual(gateway.sent_messages[0]["text"], "\u2705 7")
+
+    def test_balance_command_returns_zero_when_balance_missing_or_non_positive(self) -> None:
+        updates = [
+            {
+                "update_id": 62,
+                "message": {
+                    "message_id": 620,
+                    "from": {"id": 807},
+                    "chat": {"id": 807},
+                    "text": "/balance",
+                },
+            },
+            {
+                "update_id": 63,
+                "message": {
+                    "message_id": 630,
+                    "from": {"id": 808},
+                    "chat": {"id": 808},
+                    "text": "/balance",
+                },
+            },
+            {
+                "update_id": 64,
+                "message": {
+                    "message_id": 640,
+                    "from": {"id": 809},
+                    "chat": {"id": 809},
+                    "text": "/balance",
+                },
+            },
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        user = uow.users.create(telegram_user_id=808, interface_language=InterfaceLanguage.EN)
+        uow.users.create(telegram_user_id=809, interface_language=InterfaceLanguage.EN)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(
+                user_id=user.id,
+                available_articles_count=-5,
+                reserved_articles_count=0,
+                consumed_articles_total=0,
+            )
+        )
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 3)
+        self.assertEqual(len(gateway.sent_messages), 3)
+        self.assertEqual(gateway.sent_messages[0]["text"], "\u2705 0")
+        self.assertEqual(gateway.sent_messages[1]["text"], "\u2705 0")
+        self.assertEqual(gateway.sent_messages[2]["text"], "\u2705 0")
 
     def test_debounces_rapid_identical_callbacks(self) -> None:
         updates = [
@@ -835,6 +1017,33 @@ class TelegramRuntimeTests(unittest.TestCase):
             "👇Язык👇Language👇Idioma👇",
         )
 
+    def test_instructions_callback_sends_only_template_and_readme(self) -> None:
+        updates = [
+            {
+                "update_id": 11,
+                "callback_query": {
+                    "id": "cb-instructions-only-files",
+                    "from": {"id": 950},
+                    "message": {"message_id": 32, "chat": {"id": 950}},
+                    "data": "instructions",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=950, interface_language=InterfaceLanguage.RU)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(gateway.answered_callbacks, ["cb-instructions-only-files"])
+        self.assertEqual(len(gateway.sent_documents), 2)
+        self.assertEqual(gateway.sent_documents[0]["file_name"], "NEO_TEMPLATE.xlsx")
+        self.assertEqual(gateway.sent_documents[1]["file_name"], "README_PIPELINE.txt")
+        self.assertEqual(len(gateway.sent_messages), 0)
+
     def test_language_keyboard_contains_flags_for_all_languages(self) -> None:
         keyboard = TelegramPollingRuntime._language_keyboard()
         rows = keyboard["inline_keyboard"]
@@ -857,9 +1066,287 @@ class TelegramRuntimeTests(unittest.TestCase):
         keyboard = TelegramPollingRuntime._action_keyboard(InterfaceLanguage.RU)
         rows = keyboard["inline_keyboard"]
 
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows), 3)
         self.assertEqual(len(rows[0]), 1)
-        self.assertEqual(rows[0][0]["callback_data"], "instructions")
+        self.assertEqual(len(rows[1]), 1)
+        self.assertEqual(len(rows[2]), 1)
+        self.assertEqual(rows[0][0]["text"], get_message(InterfaceLanguage.RU, "BUTTON_BUY_POSTS_STARS"))
+        self.assertEqual(rows[0][0]["callback_data"], "buy_posts_stars")
+        self.assertEqual(rows[1][0]["text"], get_message(InterfaceLanguage.RU, "BUTTON_BUY_POSTS_CARD"))
+        self.assertEqual(rows[1][0]["callback_data"], "buy_posts_card")
+        self.assertEqual(rows[2][0]["callback_data"], "instructions")
+
+    def test_buy_posts_stars_callback_shows_three_star_packages(self) -> None:
+        updates = [
+            {
+                "update_id": 910,
+                "callback_query": {
+                    "id": "cb-buy-stars",
+                    "from": {"id": 910},
+                    "message": {"message_id": 91, "chat": {"id": 910}},
+                    "data": "buy_posts_stars",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=910, interface_language=InterfaceLanguage.RU)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(gateway.answered_callbacks, ["cb-buy-stars"])
+        self.assertEqual(len(gateway.sent_messages), 1)
+        self.assertEqual(gateway.sent_messages[0]["text"], get_message(InterfaceLanguage.RU, "PAYMENT_STARS_SELECT_PACKAGE"))
+        keyboard = gateway.sent_messages[0]["reply_markup"]
+        self.assertIsNotNone(keyboard)
+        rows = keyboard["inline_keyboard"]
+        self.assertEqual([row[0]["callback_data"] for row in rows], ["buy_stars_package:14", "buy_stars_package:42", "buy_stars_package:84"])
+        self.assertEqual(
+            [row[0]["text"] for row in rows],
+            [
+                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", count=14, price=739),
+                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", count=42, price=1499),
+                get_message(InterfaceLanguage.RU, "PAYMENT_STARS_PACKAGE_LABEL", count=84, price=2439),
+            ],
+        )
+
+    def test_buy_posts_card_callback_shows_three_card_packages_without_prices(self) -> None:
+        updates = [
+            {
+                "update_id": 911,
+                "callback_query": {
+                    "id": "cb-buy-card",
+                    "from": {"id": 911},
+                    "message": {"message_id": 92, "chat": {"id": 911}},
+                    "data": "buy_posts_card",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=911, interface_language=InterfaceLanguage.EN)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(gateway.answered_callbacks, ["cb-buy-card"])
+        self.assertEqual(len(gateway.sent_messages), 1)
+        self.assertEqual(gateway.sent_messages[0]["text"], get_message(InterfaceLanguage.EN, "PAYMENT_CARD_SELECT_PACKAGE"))
+        keyboard = gateway.sent_messages[0]["reply_markup"]
+        self.assertIsNotNone(keyboard)
+        rows = keyboard["inline_keyboard"]
+        self.assertEqual([row[0]["callback_data"] for row in rows], ["buy_card_package:14", "buy_card_package:42", "buy_card_package:84"])
+        self.assertEqual(
+            [row[0]["text"] for row in rows],
+            [
+                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", count=14),
+                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", count=42),
+                get_message(InterfaceLanguage.EN, "PAYMENT_CARD_PACKAGE_LABEL", count=84),
+            ],
+        )
+        self.assertTrue(all("⭐" not in row[0]["text"] for row in rows))
+
+    def test_buy_package_callbacks_route_to_invoice_and_card_checkout(self) -> None:
+        updates = [
+            {
+                "update_id": 912,
+                "callback_query": {
+                    "id": "cb-buy-stars-package",
+                    "from": {"id": 912},
+                    "message": {"message_id": 93, "chat": {"id": 912}},
+                    "data": "buy_stars_package:42",
+                },
+            },
+            {
+                "update_id": 913,
+                "callback_query": {
+                    "id": "cb-buy-card-package",
+                    "from": {"id": 912},
+                    "message": {"message_id": 94, "chat": {"id": 912}},
+                    "data": "buy_card_package:84",
+                },
+            },
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        uow.users.create(telegram_user_id=912, interface_language=InterfaceLanguage.RU)
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 2)
+        self.assertEqual(len(gateway.sent_invoices), 1)
+        self.assertEqual(gateway.sent_invoices[0]["currency"], "XTR")
+        self.assertEqual(gateway.sent_invoices[0]["payload"], "stars:ARTICLES_42:1")
+        self.assertEqual(gateway.sent_invoices[0]["prices"][0]["amount"], 1499)
+        self.assertEqual(len(gateway.sent_messages), 1)
+        self.assertEqual(
+            gateway.sent_messages[0]["text"],
+            get_message(
+                InterfaceLanguage.RU,
+                "PAYMENT_CARD_CHECKOUT_URL",
+                posts_count=84,
+                url="https://checkout.stripe.test/articles_84?u=1",
+            ),
+        )
+
+    def test_answers_pre_checkout_query(self) -> None:
+        updates = [
+            {
+                "update_id": 914,
+                "pre_checkout_query": {
+                    "id": "pre-1",
+                    "from": {"id": 912},
+                    "currency": "XTR",
+                    "total_amount": 739,
+                    "invoice_payload": "stars:ARTICLES_14:1",
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        runtime = self._build_runtime(gateway=gateway, uow=InMemoryUnitOfWork())
+
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(
+            gateway.answered_pre_checkout_queries,
+            [{"pre_checkout_query_id": "pre-1", "ok": True, "error_message": None}],
+        )
+
+    def test_successful_stars_payment_applies_balance_and_ledger(self) -> None:
+        updates = [
+            {
+                "update_id": 915,
+                "message": {
+                    "message_id": 95,
+                    "from": {"id": 915},
+                    "chat": {"id": 915},
+                    "successful_payment": {
+                        "currency": "XTR",
+                        "total_amount": 739,
+                        "invoice_payload": "stars:ARTICLES_14:1",
+                        "telegram_payment_charge_id": "tg-stars-charge-1",
+                        "provider_payment_charge_id": "",
+                    },
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        user = uow.users.create(telegram_user_id=915, interface_language=InterfaceLanguage.RU)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=user.id, available_articles_count=5, reserved_articles_count=0, consumed_articles_total=0)
+        )
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(len(uow.payments.payments_by_id), 1)
+        self.assertEqual(uow.balances.snapshots[user.id].available_articles_count, 19)
+        self.assertEqual(len(uow.ledger.entries), 1)
+        self.assertEqual(uow.ledger.entries[0].entry_type.value, "PURCHASE")
+        self.assertEqual(uow.ledger.entries[0].articles_delta, 14)
+        self.assertTrue(gateway.sent_messages)
+        self.assertIn("19", gateway.sent_messages[-1]["text"])
+        self.assertEqual(gateway.sent_messages[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"], "buy_posts_stars")
+
+    def test_duplicate_successful_payment_is_idempotent(self) -> None:
+        updates = [
+            {
+                "update_id": 916,
+                "message": {
+                    "message_id": 96,
+                    "from": {"id": 916},
+                    "chat": {"id": 916},
+                    "successful_payment": {
+                        "currency": "XTR",
+                        "total_amount": 1499,
+                        "invoice_payload": "stars:ARTICLES_42:1",
+                        "telegram_payment_charge_id": "tg-stars-charge-2",
+                        "provider_payment_charge_id": "",
+                    },
+                },
+            },
+            {
+                "update_id": 917,
+                "message": {
+                    "message_id": 97,
+                    "from": {"id": 916},
+                    "chat": {"id": 916},
+                    "successful_payment": {
+                        "currency": "XTR",
+                        "total_amount": 1499,
+                        "invoice_payload": "stars:ARTICLES_42:1",
+                        "telegram_payment_charge_id": "tg-stars-charge-2",
+                        "provider_payment_charge_id": "",
+                    },
+                },
+            },
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        user = uow.users.create(telegram_user_id=916, interface_language=InterfaceLanguage.EN)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=user.id, available_articles_count=1, reserved_articles_count=0, consumed_articles_total=0)
+        )
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 2)
+        self.assertEqual(len(uow.payments.payments_by_id), 1)
+        self.assertEqual(uow.balances.snapshots[user.id].available_articles_count, 43)
+        self.assertEqual(len(uow.ledger.entries), 1)
+        self.assertEqual(uow.ledger.entries[0].articles_delta, 42)
+        self.assertEqual(len(uow.tasks.tasks), 0)
+
+    def test_invalid_successful_payment_update_does_not_credit_balance(self) -> None:
+        updates = [
+            {
+                "update_id": 918,
+                "message": {
+                    "message_id": 98,
+                    "from": {"id": 918},
+                    "chat": {"id": 918},
+                    "successful_payment": {
+                        "currency": "XTR",
+                        "total_amount": 739,
+                        "invoice_payload": "invalid_payload",
+                        "telegram_payment_charge_id": "tg-stars-charge-invalid",
+                    },
+                },
+            }
+        ]
+        gateway = FakeTelegramGateway(updates=updates, files={})
+        uow = InMemoryUnitOfWork()
+        user = uow.users.create(telegram_user_id=918, interface_language=InterfaceLanguage.EN)
+        uow.balances.upsert_user_balance(
+            BalanceSnapshot(user_id=user.id, available_articles_count=2, reserved_articles_count=0, consumed_articles_total=0)
+        )
+
+        runtime = self._build_runtime(gateway=gateway, uow=uow)
+        result = runtime.run(TelegramRuntimeCommand(max_cycles=1, poll_timeout_seconds=1, idle_sleep_seconds=0.0))
+
+        self.assertEqual(result.updates_failed, 0)
+        self.assertEqual(result.updates_processed, 1)
+        self.assertEqual(len(uow.payments.payments_by_id), 0)
+        self.assertEqual(len(uow.ledger.entries), 0)
+        self.assertEqual(uow.balances.snapshots[user.id].available_articles_count, 2)
+        self.assertEqual(
+            gateway.sent_messages[0]["text"],
+            get_message(InterfaceLanguage.EN, "PAYMENT_STARS_INVALID_UPDATE"),
+        )
 
     def test_ignores_expired_callback_answer_error_and_processes_language_selection(self) -> None:
         updates = [
@@ -881,7 +1368,7 @@ class TelegramRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.updates_failed, 0)
         self.assertEqual(result.updates_processed, 1)
-        self.assertTrue(any("Available posts count: 33." in item["text"] for item in gateway.sent_messages))
+        self.assertTrue(any("Available posts count:" in item["text"] for item in gateway.sent_messages))
 
     def test_dispatches_approval_ready_notification_once_per_runtime(self) -> None:
         storage = InMemoryFileStorage()

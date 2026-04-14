@@ -32,7 +32,7 @@ class GetAvailablePostsUseCase:
         with self._uow:
             balance = self._uow.balances.get_user_balance_for_update(command.user_id)
 
-        available = 0 if balance is None else int(balance.available_articles_count)
+        available = 0 if balance is None else max(0, int(balance.available_articles_count))
 
         log_event(
             self._logger,

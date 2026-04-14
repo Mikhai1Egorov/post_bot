@@ -102,6 +102,14 @@ class LedgerEntryType(StrEnum):
     CORRECTION = "CORRECTION"
 
 
+class PaymentStatus(StrEnum):
+    PENDING = "PENDING"
+    PAID = "PAID"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    REFUNDED = "REFUNDED"
+
+
 class GenerationStatus(StrEnum):
     STARTED = "STARTED"
     SUCCEEDED = "SUCCEEDED"

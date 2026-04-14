@@ -33,6 +33,14 @@ def _config() -> AppConfig:
         outbound_timeout_seconds=15.0,
         telegram_bot_token="token-123",
         telegram_poll_timeout_seconds=30,
+        payment_stripe_provider_token=None,
+        payment_stripe_secret_key=None,
+        payment_stripe_webhook_secret=None,
+        payment_stripe_success_url=None,
+        payment_stripe_cancel_url=None,
+        payment_stripe_price_id_articles_14=None,
+        payment_stripe_price_id_articles_42=None,
+        payment_stripe_price_id_articles_84=None,
     )
 
 
@@ -568,7 +576,10 @@ class RuntimeEntrypointsTests(unittest.TestCase):
             patch("post_bot.infrastructure.runtime.bot_entrypoint.AppConfig.from_env", return_value=_config()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.configure_logging"),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.ensure_runtime_dependencies"),
-            patch("post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring", return_value=type("W", (), {"uow": object()})()),
+            patch(
+                "post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring",
+                return_value=type("W", (), {"uow": object(), "file_storage": object()})(),
+            ),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramHttpGateway", return_value=object()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.GetUserContextUseCase", return_value=object()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramPollingRuntime", return_value=fake_runtime),
@@ -607,7 +618,10 @@ class RuntimeEntrypointsTests(unittest.TestCase):
             patch("post_bot.infrastructure.runtime.bot_entrypoint.AppConfig.from_env", return_value=_config()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.configure_logging"),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.ensure_runtime_dependencies"),
-            patch("post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring", return_value=type("W", (), {"uow": object()})()),
+            patch(
+                "post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring",
+                return_value=type("W", (), {"uow": object(), "file_storage": object()})(),
+            ),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramHttpGateway", return_value=object()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.GetUserContextUseCase", return_value=object()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.FileTelegramUpdateCheckpoint") as checkpoint_cls,
@@ -648,7 +662,10 @@ class RuntimeEntrypointsTests(unittest.TestCase):
             patch("post_bot.infrastructure.runtime.bot_entrypoint.AppConfig.from_env", return_value=_config()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.configure_logging"),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.ensure_runtime_dependencies"),
-            patch("post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring", return_value=type("W", (), {"uow": object()})()),
+            patch(
+                "post_bot.infrastructure.runtime.bot_entrypoint.build_default_bot_wiring",
+                return_value=type("W", (), {"uow": object(), "file_storage": object()})(),
+            ),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramHttpGateway", return_value=object()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.GetUserContextUseCase", return_value=object()),
             patch("post_bot.infrastructure.runtime.bot_entrypoint.TelegramPollingRuntime", return_value=fake_runtime),

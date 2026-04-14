@@ -139,6 +139,79 @@ class TelegramHttpGateway:
             request_timeout_seconds=max(1.0, min(self._timeout_seconds, 5.0)),
         )
 
+    def answer_pre_checkout_query(
+        self,
+        *,
+        pre_checkout_query_id: str,
+        ok: bool,
+        error_message: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "pre_checkout_query_id": pre_checkout_query_id,
+            "ok": ok,
+        }
+        if not ok and error_message:
+            payload["error_message"] = error_message
+        self._request_json(
+            "answerPreCheckoutQuery",
+            payload,
+            max_attempts=1,
+            request_timeout_seconds=max(1.0, min(self._timeout_seconds, 5.0)),
+        )
+
+    def send_invoice(
+        self,
+        *,
+        chat_id: int | str,
+        title: str,
+        description: str,
+        payload: str,
+        currency: str,
+        prices: list[dict[str, Any]],
+        provider_token: str | None = None,
+        start_parameter: str | None = None,
+    ) -> None:
+        body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "title": title,
+            "description": description,
+            "payload": payload,
+            "currency": currency,
+            "prices": prices,
+        }
+        if provider_token is not None:
+            body["provider_token"] = provider_token
+        if start_parameter:
+            body["start_parameter"] = start_parameter
+        self._request_json(
+            "sendInvoice",
+            body,
+            max_attempts=1,
+            request_timeout_seconds=max(1.0, min(self._timeout_seconds, 10.0)),
+        )
+
+    def set_my_commands(self, *, commands: list[dict[str, str]]) -> None:
+        normalized_commands: list[dict[str, str]] = []
+        for item in commands:
+            command = str(item.get("command", "")).strip()
+            description = str(item.get("description", "")).strip()
+            if not command or not description:
+                continue
+            normalized_commands.append({"command": command, "description": description})
+
+        if not normalized_commands:
+            raise ValidationError(
+                code="TELEGRAM_COMMANDS_EMPTY",
+                message="At least one Telegram bot command is required.",
+            )
+
+        self._request_json(
+            "setMyCommands",
+            {"commands": normalized_commands},
+            max_attempts=1,
+            request_timeout_seconds=max(1.0, min(self._timeout_seconds, 10.0)),
+        )
+
     def _request_json(
         self,
         method: str,

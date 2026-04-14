@@ -80,6 +80,38 @@ class PublisherPort(Protocol):
 
 
 @dataclass(slots=True, frozen=True)
+class StripeCheckoutSession:
+    session_id: str
+    checkout_url: str
+
+
+@dataclass(slots=True, frozen=True)
+class StripeWebhookEvent:
+    event_id: str
+    event_type: str
+    payload_json: dict[str, Any]
+    created_unix: int | None = None
+
+
+class StripePaymentPort(Protocol):
+    def create_checkout_session(
+        self,
+        *,
+        package_code: str,
+        user_id: int,
+        success_url: str,
+        cancel_url: str,
+    ) -> StripeCheckoutSession: ...
+
+    def parse_webhook_event(
+        self,
+        *,
+        payload_bytes: bytes,
+        signature_header: str | None,
+    ) -> StripeWebhookEvent: ...
+
+
+@dataclass(slots=True, frozen=True)
 class InstructionBundle:
     template_file_name: str
     template_bytes: bytes

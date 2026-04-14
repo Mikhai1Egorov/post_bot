@@ -11,10 +11,11 @@ from post_bot.shared.errors import AppError
 from post_bot.shared.tracing import get_trace_context
 
 
-def configure_logging(level: str = "INFO") -> None:
+def configure_logging(level: str = "WARNING") -> None:
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=getattr(logging, level.upper(), logging.WARNING),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        force=True,
     )
 
 

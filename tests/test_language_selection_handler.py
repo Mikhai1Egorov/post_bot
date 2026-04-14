@@ -36,8 +36,10 @@ class LanguageSelectionHandlerTests(unittest.TestCase):
         self.assertEqual(result.user_id, 1)
         self.assertTrue(result.created)
         self.assertEqual(result.interface_language, InterfaceLanguage.ES)
+        balance = uow.balances.get_user_balance_for_update(result.user_id)
+        assert balance is not None
         self.assertIn(
-            get_message(InterfaceLanguage.ES, "AVAILABLE_POSTS", available=33),
+            get_message(InterfaceLanguage.ES, "AVAILABLE_POSTS", available=balance.available_articles_count),
             result.response_text,
         )
         self.assertIn("Sube tu archivo Excel.", result.response_text)

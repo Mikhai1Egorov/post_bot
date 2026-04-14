@@ -13,6 +13,7 @@ from post_bot.domain.protocols.repositories import (
     BalanceRepository,
     GenerationRepository,
     LedgerRepository,
+    PaymentRepository,
     PublicationRepository,
     RenderRepository,
     ResearchSourceRepository,
@@ -31,6 +32,7 @@ from post_bot.infrastructure.db.mysql_repositories import (
     MySQLBalanceRepository,
     MySQLGenerationRepository,
     MySQLLedgerRepository,
+    MySQLPaymentRepository,
     MySQLPublicationRepository,
     MySQLRenderRepository,
     MySQLResearchSourceRepository,
@@ -56,6 +58,7 @@ class MySQLUnitOfWork:
         self.tasks: TaskRepository
         self.balances: BalanceRepository
         self.ledger: LedgerRepository
+        self.payments: PaymentRepository
         self.task_status_history: TaskStatusHistoryRepository
         self.research_sources: ResearchSourceRepository
         self.generations: GenerationRepository
@@ -86,6 +89,7 @@ class MySQLUnitOfWork:
             self.tasks = MySQLTaskRepository(conn)
             self.balances = MySQLBalanceRepository(conn)
             self.ledger = MySQLLedgerRepository(conn)
+            self.payments = MySQLPaymentRepository(conn)
             self.task_status_history = MySQLTaskStatusHistoryRepository(conn)
             self.research_sources = MySQLResearchSourceRepository(conn)
             self.generations = MySQLGenerationRepository(conn)

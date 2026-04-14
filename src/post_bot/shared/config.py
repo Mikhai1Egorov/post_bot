@@ -28,14 +28,22 @@ class AppConfig:
     outbound_timeout_seconds: float
     telegram_bot_token: str | None
     telegram_poll_timeout_seconds: int
+    payment_stripe_provider_token: str | None
+    payment_stripe_secret_key: str | None
+    payment_stripe_webhook_secret: str | None
+    payment_stripe_success_url: str | None
+    payment_stripe_cancel_url: str | None
+    payment_stripe_price_id_articles_14: str | None
+    payment_stripe_price_id_articles_42: str | None
+    payment_stripe_price_id_articles_84: str | None
     openai_image_model: str = "gpt-image-1"
 
     @classmethod
-    def from_env(cls) -> "AppConfig":
+    def from_env(cls) -> 'AppConfig':
         _load_dotenv_values()
 
         env = os.getenv("APP_ENV", "dev")
-        log_level = os.getenv("APP_LOG_LEVEL", "INFO")
+        log_level = os.getenv("APP_LOG_LEVEL", "WARNING")
 
         db_host = _required_trimmed("DB_HOST", default_value="localhost")
 
@@ -135,6 +143,41 @@ class AppConfig:
             outbound_timeout_seconds=outbound_timeout_seconds,
             telegram_bot_token=_optional_trimmed("TELEGRAM_BOT_TOKEN"),
             telegram_poll_timeout_seconds=telegram_poll_timeout_seconds,
+            payment_stripe_provider_token=_optional_trimmed_any(
+                "PAYMENT_STRIPE_PROVIDER_TOKEN",
+                "STRIPE_PROVIDER_TOKEN",
+            ),
+            payment_stripe_secret_key=_optional_trimmed_any(
+                "PAYMENT_STRIPE_SECRET_KEY",
+                "STRIPE_SECRET_KEY",
+            ),
+            payment_stripe_webhook_secret=_optional_trimmed_any(
+                "PAYMENT_STRIPE_WEBHOOK_SECRET",
+                "STRIPE_WEBHOOK_SECRET",
+            ),
+            payment_stripe_success_url=_optional_trimmed_any(
+                "PAYMENT_STRIPE_SUCCESS_URL",
+                "STRIPE_SUCCESS_URL",
+            ),
+            payment_stripe_cancel_url=_optional_trimmed_any(
+                "PAYMENT_STRIPE_CANCEL_URL",
+                "STRIPE_CANCEL_URL",
+            ),
+            payment_stripe_price_id_articles_14=_optional_trimmed_any(
+                "PAYMENT_STRIPE_PRICE_ID_ARTICLES_14",
+                "STRIPE_PRICE_ID_ARTICLES_14",
+                "STRIPE_PRICE_ID_14",
+            ),
+            payment_stripe_price_id_articles_42=_optional_trimmed_any(
+                "PAYMENT_STRIPE_PRICE_ID_ARTICLES_42",
+                "STRIPE_PRICE_ID_ARTICLES_42",
+                "STRIPE_PRICE_ID_42",
+            ),
+            payment_stripe_price_id_articles_84=_optional_trimmed_any(
+                "PAYMENT_STRIPE_PRICE_ID_ARTICLES_84",
+                "STRIPE_PRICE_ID_ARTICLES_84",
+                "STRIPE_PRICE_ID_84",
+            ),
         )
 
     def require_telegram_bot_token(self) -> str:
@@ -150,6 +193,14 @@ class AppConfig:
 def _optional_trimmed(env_name: str) -> str | None:
     value = os.getenv(env_name, "").strip()
     return value or None
+
+
+def _optional_trimmed_any(*env_names: str) -> str | None:
+    for env_name in env_names:
+        value = _optional_trimmed(env_name)
+        if value is not None:
+            return value
+    return None
 
 
 def _required_trimmed(env_name: str, default_value: str | None = None) -> str:
@@ -237,4 +288,3 @@ def _is_truthy(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
-

@@ -13,12 +13,15 @@ import logging
 from pathlib import Path
 from typing import cast
 
+from post_bot.application.use_cases.create_stripe_checkout_session import CreateStripeCheckoutSessionUseCase
 from post_bot.application.use_cases.get_available_posts import GetAvailablePostsUseCase
+from post_bot.application.use_cases.apply_telegram_stars_payment import ApplyTelegramStarsPaymentUseCase
 from post_bot.application.use_cases.get_user_context import GetUserContextUseCase
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase
 from post_bot.application.use_cases.mark_approval_batch_notified import MarkApprovalBatchNotifiedUseCase
 from post_bot.application.use_cases.archive_approval_inbox_timeout import ArchiveApprovalInboxTimeoutUseCase
 from post_bot.application.use_cases.select_expirable_approval_batches import SelectExpirableApprovalBatchesUseCase
+from post_bot.infrastructure.external import StripePackageDefinition, StripePaymentAdapter
 from post_bot.infrastructure.runtime.bot_wiring import build_default_bot_wiring
 from post_bot.infrastructure.runtime.path_resolution import resolve_project_root
 from post_bot.infrastructure.runtime.startup_checks import ensure_runtime_dependencies
@@ -31,8 +34,30 @@ from post_bot.infrastructure.runtime.telegram_runtime import (
 )
 from post_bot.infrastructure.telegram import TelegramHttpGateway
 from post_bot.shared.config import AppConfig
+from post_bot.shared.constants import STRIPE_PACKAGE_DEFINITIONS
 from post_bot.shared.errors import AppError, InternalError
 from post_bot.shared.logging import configure_logging, log_event
+
+
+TELEGRAM_BOT_COMMANDS: list[dict[str, str]] = [
+    {"command": "start", "description": "Start bot"},
+    {"command": "balance", "description": "Show balance"},
+]
+
+
+def _build_stripe_package_definitions(config: AppConfig) -> tuple[StripePackageDefinition, ...]:
+    price_id_by_package_code = {
+        "ARTICLES_14": config.payment_stripe_price_id_articles_14,
+        "ARTICLES_42": config.payment_stripe_price_id_articles_42,
+        "ARTICLES_84": config.payment_stripe_price_id_articles_84,
+    }
+    definitions: list[StripePackageDefinition] = []
+    for package_code, _posts_count in STRIPE_PACKAGE_DEFINITIONS:
+        price_id = price_id_by_package_code.get(package_code)
+        if not price_id:
+            continue
+        definitions.append(StripePackageDefinition(package_code=package_code, price_id=price_id))
+    return tuple(definitions)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -84,6 +109,18 @@ def main() -> int:
                 timeout_seconds=max(config.outbound_timeout_seconds, float(config.telegram_poll_timeout_seconds) + 5.0),
             ),
         )
+        if hasattr(gateway, "set_my_commands"):
+            try:
+                cast(TelegramHttpGateway, gateway).set_my_commands(commands=TELEGRAM_BOT_COMMANDS)
+            except AppError as error:
+                log_event(
+                    logger,
+                    level=30,
+                    module="infrastructure.runtime.bot_entrypoint",
+                    action="set_my_commands",
+                    result="failure",
+                    error=error,
+                )
 
         get_available_posts = GetAvailablePostsUseCase(
             uow=bot_wiring.uow,
@@ -112,6 +149,38 @@ def main() -> int:
             zip_builder=ZipBuilder(),
             logger=logger.getChild("archive_approval_inbox_timeout"),
         )
+        apply_telegram_stars_payment = ApplyTelegramStarsPaymentUseCase(
+            uow=bot_wiring.uow,
+            logger=logger.getChild("apply_telegram_stars_payment"),
+        )
+        create_stripe_checkout_session = None
+        if config.payment_stripe_secret_key:
+            package_definitions = _build_stripe_package_definitions(config)
+            if len(package_definitions) < len(STRIPE_PACKAGE_DEFINITIONS):
+                log_event(
+                    logger,
+                    level=30,
+                    module="infrastructure.runtime.bot_entrypoint",
+                    action="stripe_checkout_disabled",
+                    result="failure",
+                    extra={
+                        "reason": "stripe_price_ids_missing",
+                        "configured_packages": len(package_definitions),
+                        "required_packages": len(STRIPE_PACKAGE_DEFINITIONS),
+                    },
+                )
+            else:
+                stripe_adapter = StripePaymentAdapter(
+                    secret_key=config.payment_stripe_secret_key,
+                    webhook_secret=config.payment_stripe_webhook_secret,
+                    provider_token=config.payment_stripe_provider_token,
+                    package_definitions=package_definitions,
+                    timeout_seconds=config.outbound_timeout_seconds,
+                )
+                create_stripe_checkout_session = CreateStripeCheckoutSessionUseCase(
+                    stripe_payment=stripe_adapter,
+                    logger=logger.getChild("create_stripe_checkout_session"),
+                )
 
         runtime = TelegramPollingRuntime(
             gateway=gateway,
@@ -122,6 +191,10 @@ def main() -> int:
             mark_approval_batch_notified=mark_approval_batch_notified,
             select_expirable_approval_batches=select_expirable_approval_batches,
             archive_approval_inbox_timeout=archive_approval_inbox_timeout,
+            apply_telegram_stars_payment=apply_telegram_stars_payment,
+            create_stripe_checkout_session=create_stripe_checkout_session,
+            stripe_success_url=config.payment_stripe_success_url,
+            stripe_cancel_url=config.payment_stripe_cancel_url,
             logger=logger,
             update_checkpoint=update_checkpoint,
         )
@@ -147,7 +220,7 @@ def main() -> int:
         )
         return 1 if result.failed_cycles > 0 or result.terminated_early else 0
     except AppError as error:
-        configure_logging("INFO")
+        configure_logging("WARNING")
         logger = logging.getLogger("post_bot.runtime.telegram")
         log_event(
             logger,
@@ -159,7 +232,7 @@ def main() -> int:
         )
         return 1
     except Exception as exc:  # noqa: BLE001
-        configure_logging("INFO")
+        configure_logging("WARNING")
         logger = logging.getLogger("post_bot.runtime.telegram")
         internal = InternalError(
             code="BOT_ENTRYPOINT_UNEXPECTED_ERROR",

@@ -14,7 +14,15 @@ from post_bot.application.use_cases.archive_approval_inbox_timeout import (
     ArchiveApprovalInboxTimeoutCommand,
     ArchiveApprovalInboxTimeoutUseCase,
 )
-from post_bot.application.use_cases.get_available_posts import GetAvailablePostsUseCase
+from post_bot.application.use_cases.apply_telegram_stars_payment import (
+    ApplyTelegramStarsPaymentCommand,
+    ApplyTelegramStarsPaymentUseCase,
+)
+from post_bot.application.use_cases.create_stripe_checkout_session import (
+    CreateStripeCheckoutSessionCommand,
+    CreateStripeCheckoutSessionUseCase,
+)
+from post_bot.application.use_cases.get_available_posts import GetAvailablePostsCommand, GetAvailablePostsUseCase
 from post_bot.application.use_cases.get_user_context import GetUserContextCommand, GetUserContextUseCase
 from post_bot.application.use_cases.list_pending_approval_notifications import ListPendingApprovalNotificationsUseCase
 from post_bot.application.use_cases.mark_approval_batch_notified import (
@@ -32,6 +40,7 @@ from post_bot.bot.handlers.language_selection import HandleLanguageSelectionComm
 from post_bot.bot.handlers.telegram_upload_command import HandleTelegramUploadCommand
 from post_bot.infrastructure.runtime.anti_spam import CallbackDebounceCache, FixedWindowRateLimiter
 from post_bot.infrastructure.runtime.bot_wiring import BotWiring
+from post_bot.shared.constants import STRIPE_PACKAGE_DEFINITIONS, TELEGRAM_STARS_CURRENCY_CODE, TELEGRAM_STARS_PACKAGE_DEFINITIONS
 from post_bot.shared.enums import ApprovalBatchStatus, InterfaceLanguage
 from post_bot.shared.errors import AppError, BusinessRuleError, ValidationError
 from post_bot.shared.localization import get_message, parse_interface_language
@@ -42,8 +51,11 @@ THROTTLE_RULES: dict[str, tuple[int, float, str | None]] = {
     "command_start": (5, 10.0, None),
     "command_language": (5, 10.0, None),
     "command_help": (5, 10.0, None),
+    "command_balance": (5, 10.0, None),
     "callback_lang": (5, 10.0, None),
     "callback_instructions": (3, 10.0, "THROTTLED_RETRY_SHORT"),
+    "callback_buy_posts": (5, 10.0, "THROTTLED_RETRY_SHORT"),
+    "callback_package_select": (5, 10.0, "THROTTLED_RETRY_SHORT"),
     "callback_publish": (3, 10.0, "THROTTLED_RETRY_SHORT"),
     "callback_download": (3, 10.0, "THROTTLED_RETRY_SHORT"),
     "callback_upload_prompt": (3, 10.0, "THROTTLED_RETRY_SHORT"),
@@ -59,6 +71,20 @@ ALLOWED_UPLOAD_MIME_TYPES = {
     "application/octet-stream",
     "application/vnd.ms-excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+STARS_PACKAGE_OPTIONS: tuple[tuple[str, int, int], ...] = TELEGRAM_STARS_PACKAGE_DEFINITIONS
+CARD_PACKAGE_OPTIONS: tuple[int, ...] = tuple(posts_count for _package_code, posts_count in STRIPE_PACKAGE_DEFINITIONS)
+STARS_PACKAGES_BY_COUNT: dict[int, tuple[str, int]] = {
+    posts_count: (package_code, stars_price)
+    for package_code, posts_count, stars_price in STARS_PACKAGE_OPTIONS
+}
+STARS_PACKAGES_BY_CODE: dict[str, tuple[int, int]] = {
+    package_code: (posts_count, stars_price)
+    for package_code, posts_count, stars_price in STARS_PACKAGE_OPTIONS
+}
+CARD_PACKAGES_BY_COUNT: dict[int, str] = {
+    posts_count: package_code
+    for package_code, posts_count in STRIPE_PACKAGE_DEFINITIONS
 }
 
 
@@ -85,6 +111,27 @@ class TelegramGatewayPort(Protocol):
     def download_file(self, *, file_id: str, fallback_file_name: str | None = None) -> TelegramDownloadedFile: ...
 
     def answer_callback_query(self, *, callback_query_id: str) -> None: ...
+
+    def answer_pre_checkout_query(
+        self,
+        *,
+        pre_checkout_query_id: str,
+        ok: bool,
+        error_message: str | None = None,
+    ) -> None: ...
+
+    def send_invoice(
+        self,
+        *,
+        chat_id: int | str,
+        title: str,
+        description: str,
+        payload: str,
+        currency: str,
+        prices: list[dict[str, Any]],
+        provider_token: str | None = None,
+        start_parameter: str | None = None,
+    ) -> None: ...
 
 
 class TelegramUpdateCheckpointPort(Protocol):
@@ -127,6 +174,10 @@ class TelegramPollingRuntime:
         mark_approval_batch_notified: MarkApprovalBatchNotifiedUseCase,
         select_expirable_approval_batches: SelectExpirableApprovalBatchesUseCase,
         archive_approval_inbox_timeout: ArchiveApprovalInboxTimeoutUseCase,
+        apply_telegram_stars_payment: ApplyTelegramStarsPaymentUseCase,
+        create_stripe_checkout_session: CreateStripeCheckoutSessionUseCase | None,
+        stripe_success_url: str | None,
+        stripe_cancel_url: str | None,
         logger: Logger,
         update_checkpoint: TelegramUpdateCheckpointPort | None = None,
         now_provider: Callable[[], float] | None = None,
@@ -143,6 +194,10 @@ class TelegramPollingRuntime:
         self._mark_approval_batch_notified = mark_approval_batch_notified
         self._select_expirable_approval_batches = select_expirable_approval_batches
         self._archive_approval_inbox_timeout = archive_approval_inbox_timeout
+        self._apply_telegram_stars_payment = apply_telegram_stars_payment
+        self._create_stripe_checkout_session = create_stripe_checkout_session
+        self._stripe_success_url = stripe_success_url
+        self._stripe_cancel_url = stripe_cancel_url
         self._logger = logger
         self._update_checkpoint = update_checkpoint
         self._now_provider = now_provider or time.monotonic
@@ -370,9 +425,37 @@ class TelegramPollingRuntime:
                 )
             return handled
 
+        pre_checkout_query = update.get("pre_checkout_query")
+        if isinstance(pre_checkout_query, dict):
+            handled = self._handle_pre_checkout_query(pre_checkout_query)
+            if handled:
+                log_event(
+                    self._logger,
+                    level=20,
+                    module="infrastructure.telegram.runtime",
+                    action="pre_checkout_query_handled",
+                    result="success",
+                    duration_ms=timer.elapsed_ms(),
+                )
+            return handled
+
         message = update.get("message")
         if not isinstance(message, dict):
             return False
+
+        successful_payment = message.get("successful_payment")
+        if isinstance(successful_payment, dict):
+            handled = self._handle_successful_payment_message(message, successful_payment)
+            if handled:
+                log_event(
+                    self._logger,
+                    level=20,
+                    module="infrastructure.telegram.runtime",
+                    action="successful_payment_handled",
+                    result="success",
+                    duration_ms=timer.elapsed_ms(),
+                )
+            return handled
 
         text = message.get("text")
         if isinstance(text, str):
@@ -413,7 +496,7 @@ class TelegramPollingRuntime:
 
     def _handle_text_message(self, message: dict[str, Any], text: str) -> bool:
         command = text.strip().lower()
-        if command not in {"/start", "/language", "/help"}:
+        if command not in {"/start", "/balance"}:
             return False
 
         chat_id = self._message_chat_id(message)
@@ -428,6 +511,15 @@ class TelegramPollingRuntime:
             chat_id=chat_id,
             language=InterfaceLanguage.EN,
         ):
+            return True
+
+        if command == "/balance":
+            context = self._get_user_context.execute(GetUserContextCommand(telegram_user_id=telegram_user_id))
+            available_count = 0
+            if context.found and context.user_id is not None:
+                result = self._get_available_posts.execute(GetAvailablePostsCommand(user_id=context.user_id))
+                available_count = max(0, int(result.available_posts_count))
+            self._gateway.send_message(chat_id=chat_id, text=f"\u2705 {available_count}")
             return True
 
         self._send_language_prompt(chat_id)
@@ -460,7 +552,6 @@ class TelegramPollingRuntime:
             self._gateway.send_message(
                 chat_id=chat_id,
                 text=metadata_error_message,
-                reply_markup=self._action_keyboard(context.interface_language),
             )
             return True
 
@@ -486,7 +577,6 @@ class TelegramPollingRuntime:
         self._gateway.send_message(
             chat_id=chat_id,
             text=result.response_text,
-            reply_markup=self._action_keyboard(context.interface_language),
         )
         return True
 
@@ -579,11 +669,6 @@ class TelegramPollingRuntime:
                 file_name=result.readme_file_name,
                 payload=result.readme_bytes,
             )
-            self._gateway.send_message(
-                chat_id=chat_id,
-                text=result.response_text,
-                reply_markup=self._action_keyboard(context.interface_language),
-            )
             return True
 
         if data == "upload":
@@ -597,7 +682,192 @@ class TelegramPollingRuntime:
             self._gateway.send_message(
                 chat_id=chat_id,
                 text=get_message(context.interface_language, "UPLOAD_PROMPT"),
-                reply_markup=self._action_keyboard(context.interface_language),
+            )
+            return True
+
+        if data == "buy_posts_stars":
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_buy_posts",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(context.interface_language, "PAYMENT_STARS_SELECT_PACKAGE"),
+                reply_markup=self._stars_packages_keyboard(context.interface_language),
+            )
+            return True
+
+        if data == "buy_posts_card":
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_buy_posts",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(context.interface_language, "PAYMENT_CARD_SELECT_PACKAGE"),
+                reply_markup=self._card_packages_keyboard(context.interface_language),
+            )
+            return True
+
+        if data.startswith("buy_stars_package:"):
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_package_select",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
+            posts_count = self._parse_posts_package(
+                data,
+                prefix="buy_stars_package:",
+                allowed_counts=set(STARS_PACKAGES_BY_COUNT.keys()),
+            )
+            package_code, stars_price = STARS_PACKAGES_BY_COUNT[posts_count]
+            invoice_payload = self._build_stars_invoice_payload(
+                user_id=context.user_id,
+                package_code=package_code,
+            )
+            try:
+                self._gateway.send_invoice(
+                    chat_id=chat_id,
+                    title=get_message(context.interface_language, "PAYMENT_STARS_INVOICE_TITLE", count=posts_count),
+                    description=get_message(
+                        context.interface_language,
+                        "PAYMENT_STARS_INVOICE_DESCRIPTION",
+                        count=posts_count,
+                        price=stars_price,
+                    ),
+                    payload=invoice_payload,
+                    currency=TELEGRAM_STARS_CURRENCY_CODE,
+                    prices=[
+                        {
+                            "label": get_message(
+                                context.interface_language,
+                                "PAYMENT_STARS_PACKAGE_LABEL",
+                                count=posts_count,
+                                price=stars_price,
+                            ),
+                            "amount": stars_price,
+                        }
+                    ],
+                    provider_token="",
+                    start_parameter=f"stars_{posts_count}",
+                )
+            except AppError as error:
+                log_event(
+                    self._logger,
+                    level=30,
+                    module="infrastructure.telegram.runtime",
+                    action="invoice_created",
+                    result="failure",
+                    error=error,
+                    extra={
+                        "user_id": context.user_id,
+                        "package_code": package_code,
+                        "posts_count": posts_count,
+                        "stars_price": stars_price,
+                    },
+                )
+                self._gateway.send_message(
+                    chat_id=chat_id,
+                    text=get_message(context.interface_language, "PAYMENT_STARS_INVOICE_FAILED"),
+                )
+                return True
+
+            log_event(
+                self._logger,
+                level=20,
+                module="infrastructure.telegram.runtime",
+                action="invoice_created",
+                result="success",
+                extra={
+                    "user_id": context.user_id,
+                    "package_code": package_code,
+                    "posts_count": posts_count,
+                    "stars_price": stars_price,
+                },
+            )
+            return True
+
+        if data.startswith("buy_card_package:"):
+            if not self._is_action_allowed(
+                telegram_user_id=telegram_user_id,
+                action_name="callback_package_select",
+                chat_id=chat_id,
+                language=context.interface_language,
+            ):
+                return True
+            posts_count = self._parse_posts_package(
+                data,
+                prefix="buy_card_package:",
+                allowed_counts=set(CARD_PACKAGES_BY_COUNT.keys()),
+            )
+            if (
+                self._create_stripe_checkout_session is None
+                or not self._stripe_success_url
+                or not self._stripe_cancel_url
+            ):
+                self._gateway.send_message(
+                    chat_id=chat_id,
+                    text=get_message(context.interface_language, "PAYMENT_CARD_CHECKOUT_UNAVAILABLE"),
+                )
+                return True
+            package_code = CARD_PACKAGES_BY_COUNT[posts_count]
+            try:
+                session_result = self._create_stripe_checkout_session.execute(
+                    CreateStripeCheckoutSessionCommand(
+                        user_id=context.user_id,
+                        posts_count=posts_count,
+                        success_url=self._stripe_success_url,
+                        cancel_url=self._stripe_cancel_url,
+                    )
+                )
+            except AppError as error:
+                log_event(
+                    self._logger,
+                    level=30,
+                    module="infrastructure.telegram.runtime",
+                    action="checkout_session_created",
+                    result="failure",
+                    error=error,
+                    extra={
+                        "user_id": context.user_id,
+                        "package_code": package_code,
+                        "posts_count": posts_count,
+                    },
+                )
+                self._gateway.send_message(
+                    chat_id=chat_id,
+                    text=get_message(context.interface_language, "PAYMENT_CARD_CHECKOUT_FAILED"),
+                )
+                return True
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(
+                    context.interface_language,
+                    "PAYMENT_CARD_CHECKOUT_URL",
+                    posts_count=posts_count,
+                    url=session_result.checkout_url,
+                ),
+            )
+            log_event(
+                self._logger,
+                level=20,
+                module="infrastructure.telegram.runtime",
+                action="checkout_session_created",
+                result="success",
+                extra={
+                    "user_id": context.user_id,
+                    "package_code": session_result.package_code,
+                    "posts_count": posts_count,
+                    "checkout_session_id": session_result.checkout_session_id,
+                },
             )
             return True
 
@@ -621,7 +891,6 @@ class TelegramPollingRuntime:
             self._gateway.send_message(
                 chat_id=chat_id,
                 text=result.response_text,
-                reply_markup=self._action_keyboard(context.interface_language),
             )
             if result.success:
                 self._dispatch_pending_approval_notifications(limit=1, only_user_id=context.user_id)
@@ -653,13 +922,191 @@ class TelegramPollingRuntime:
             self._gateway.send_message(
                 chat_id=chat_id,
                 text=result.response_text,
-                reply_markup=self._action_keyboard(context.interface_language),
             )
             if result.success:
                 self._dispatch_pending_approval_notifications(limit=1, only_user_id=context.user_id)
             return True
 
         return False
+
+    def _handle_pre_checkout_query(self, pre_checkout_query: dict[str, Any]) -> bool:
+        pre_checkout_query_id = pre_checkout_query.get("id")
+        if not isinstance(pre_checkout_query_id, str) or not pre_checkout_query_id:
+            return False
+
+        self._gateway.answer_pre_checkout_query(
+            pre_checkout_query_id=pre_checkout_query_id,
+            ok=True,
+        )
+        return True
+
+    def _handle_successful_payment_message(
+        self,
+        message: dict[str, Any],
+        successful_payment: dict[str, Any],
+    ) -> bool:
+        chat_id = self._message_chat_id(message)
+        telegram_user_id = self._message_user_id(message)
+        if chat_id is None or telegram_user_id is None:
+            return False
+
+        context = self._get_user_context.execute(GetUserContextCommand(telegram_user_id=telegram_user_id))
+        if not context.found or context.user_id is None or context.interface_language is None:
+            self._send_language_prompt(chat_id)
+            return True
+
+        payload_raw = successful_payment.get("invoice_payload")
+        currency_raw = successful_payment.get("currency")
+        total_amount_raw = successful_payment.get("total_amount")
+        telegram_charge_id_raw = successful_payment.get("telegram_payment_charge_id")
+        provider_charge_id_raw = successful_payment.get("provider_payment_charge_id")
+
+        if (
+            not isinstance(payload_raw, str)
+            or not isinstance(currency_raw, str)
+            or not isinstance(total_amount_raw, int)
+            or not isinstance(telegram_charge_id_raw, str)
+            or not telegram_charge_id_raw.strip()
+        ):
+            log_event(
+                self._logger,
+                level=30,
+                module="infrastructure.telegram.runtime",
+                action="payment_failed",
+                result="failure",
+                extra={
+                    "telegram_user_id": telegram_user_id,
+                    "reason": "successful_payment_payload_invalid",
+                },
+            )
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(context.interface_language, "PAYMENT_STARS_INVALID_UPDATE"),
+            )
+            return True
+
+        try:
+            package_code, payload_user_id = self._parse_stars_invoice_payload(payload_raw)
+        except ValidationError:
+            log_event(
+                self._logger,
+                level=30,
+                module="infrastructure.telegram.runtime",
+                action="payment_failed",
+                result="failure",
+                extra={
+                    "telegram_user_id": telegram_user_id,
+                    "reason": "invoice_payload_invalid",
+                    "invoice_payload": payload_raw,
+                },
+            )
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(context.interface_language, "PAYMENT_STARS_INVALID_UPDATE"),
+            )
+            return True
+
+        if payload_user_id != context.user_id:
+            log_event(
+                self._logger,
+                level=30,
+                module="infrastructure.telegram.runtime",
+                action="payment_failed",
+                result="failure",
+                extra={
+                    "telegram_user_id": telegram_user_id,
+                    "reason": "invoice_payload_user_mismatch",
+                    "payload_user_id": payload_user_id,
+                    "actual_user_id": context.user_id,
+                },
+            )
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(context.interface_language, "PAYMENT_STARS_INVALID_UPDATE"),
+            )
+            return True
+
+        provider_charge_id = provider_charge_id_raw if isinstance(provider_charge_id_raw, str) and provider_charge_id_raw else None
+
+        log_event(
+            self._logger,
+            level=20,
+            module="infrastructure.telegram.runtime",
+            action="payment_received",
+            result="success",
+            extra={
+                "telegram_user_id": telegram_user_id,
+                "user_id": context.user_id,
+                "package_code": package_code,
+                "currency_code": currency_raw,
+                "total_amount": total_amount_raw,
+                "provider_payment_id": telegram_charge_id_raw,
+            },
+        )
+
+        try:
+            apply_result = self._apply_telegram_stars_payment.execute(
+                ApplyTelegramStarsPaymentCommand(
+                    user_id=context.user_id,
+                    package_code=package_code,
+                    telegram_charge_id=telegram_charge_id_raw,
+                    provider_charge_id=provider_charge_id,
+                    total_amount=total_amount_raw,
+                    currency_code=currency_raw,
+                    raw_payload_json={
+                        "telegram_user_id": telegram_user_id,
+                        "successful_payment": successful_payment,
+                        "message_id": message.get("message_id"),
+                    },
+                )
+            )
+        except AppError as error:
+            log_event(
+                self._logger,
+                level=30,
+                module="infrastructure.telegram.runtime",
+                action="payment_failed",
+                result="failure",
+                error=error,
+                extra={
+                    "telegram_user_id": telegram_user_id,
+                    "user_id": context.user_id,
+                    "package_code": package_code,
+                },
+            )
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(context.interface_language, "PAYMENT_STARS_APPLY_FAILED"),
+            )
+            return True
+
+        posts_count, _stars_price = STARS_PACKAGES_BY_CODE[package_code]
+        if apply_result.duplicated:
+            self._gateway.send_message(
+                chat_id=chat_id,
+                text=get_message(
+                    context.interface_language,
+                    "PAYMENT_STARS_DUPLICATE",
+                    available=apply_result.available_articles_count,
+                ),
+            )
+            return True
+
+        self._gateway.send_message(
+            chat_id=chat_id,
+            text=get_message(
+                context.interface_language,
+                "PAYMENT_STARS_SUCCESS",
+                count=posts_count,
+                available=apply_result.available_articles_count,
+            ),
+        )
+        self._send_home_screen(
+            chat_id=chat_id,
+            user_id=context.user_id,
+            language=context.interface_language,
+        )
+        return True
 
     def _dispatch_pending_approval_notifications(self, *, limit: int, only_user_id: int | None = None) -> set[int]:
         selection_limit = None if only_user_id is not None else limit
@@ -747,7 +1194,6 @@ class TelegramPollingRuntime:
                         "APPROVAL_TIMEOUT_ARCHIVE_SENT",
                         count=len(result.archived_task_ids),
                     ),
-                    reply_markup=self._action_keyboard(result.interface_language),
                 )
 
     @staticmethod
@@ -804,6 +1250,18 @@ class TelegramPollingRuntime:
     def _action_keyboard(language: InterfaceLanguage) -> dict[str, object]:
         return {
             "inline_keyboard": [
+                [
+                    {
+                        "text": get_message(language, "BUTTON_BUY_POSTS_STARS"),
+                        "callback_data": "buy_posts_stars",
+                    }
+                ],
+                [
+                    {
+                        "text": get_message(language, "BUTTON_BUY_POSTS_CARD"),
+                        "callback_data": "buy_posts_card",
+                    }
+                ],
                 [
                     {
                         "text": f"\U0001F4D8 {get_message(language, 'BUTTON_HOW_TO_USE')}",
@@ -922,9 +1380,117 @@ class TelegramPollingRuntime:
         return (
             callback_data.startswith("lang:")
             or callback_data == "instructions"
+            or callback_data in {"buy_posts_stars", "buy_posts_card"}
+            or callback_data.startswith("buy_stars_package:")
+            or callback_data.startswith("buy_card_package:")
             or callback_data.startswith("approval_publish:")
             or callback_data.startswith("approval_download:")
         )
+
+    @staticmethod
+    def _stars_packages_keyboard(language: InterfaceLanguage) -> dict[str, object]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": get_message(language, "PAYMENT_STARS_PACKAGE_LABEL", count=posts_count, price=stars_price),
+                        "callback_data": f"buy_stars_package:{posts_count}",
+                    }
+                ]
+                for _, posts_count, stars_price in STARS_PACKAGE_OPTIONS
+            ]
+        }
+
+    @staticmethod
+    def _card_packages_keyboard(language: InterfaceLanguage) -> dict[str, object]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": get_message(language, "PAYMENT_CARD_PACKAGE_LABEL", count=posts_count),
+                        "callback_data": f"buy_card_package:{posts_count}",
+                    }
+                ]
+                for posts_count in CARD_PACKAGE_OPTIONS
+            ]
+        }
+
+    def _send_home_screen(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        language: InterfaceLanguage,
+    ) -> None:
+        available = self._get_available_posts.execute(GetAvailablePostsCommand(user_id=user_id))
+        text = "\n\n".join(
+            [
+                get_message(language, "AVAILABLE_POSTS", available=available.available_posts_count),
+                get_message(language, "UPLOAD_PROMPT"),
+            ]
+        )
+        self._gateway.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=self._action_keyboard(language),
+        )
+
+    @staticmethod
+    def _build_stars_invoice_payload(*, user_id: int, package_code: str) -> str:
+        return f"stars:{package_code}:{user_id}"
+
+    @staticmethod
+    def _parse_stars_invoice_payload(payload: str) -> tuple[str, int]:
+        parts = [part.strip() for part in payload.split(":")]
+        if len(parts) != 3 or parts[0] != "stars":
+            raise ValidationError(
+                code="TELEGRAM_STARS_INVOICE_PAYLOAD_INVALID",
+                message="Telegram Stars invoice payload is invalid.",
+                details={"payload": payload},
+            )
+
+        package_code = parts[1]
+        if package_code not in STARS_PACKAGES_BY_CODE:
+            raise ValidationError(
+                code="TELEGRAM_STARS_INVOICE_PAYLOAD_INVALID",
+                message="Telegram Stars invoice payload contains unsupported package code.",
+                details={"payload": payload},
+            )
+        try:
+            user_id = int(parts[2])
+        except ValueError as exc:
+            raise ValidationError(
+                code="TELEGRAM_STARS_INVOICE_PAYLOAD_INVALID",
+                message="Telegram Stars invoice payload user id is invalid.",
+                details={"payload": payload},
+            ) from exc
+        if user_id <= 0:
+            raise ValidationError(
+                code="TELEGRAM_STARS_INVOICE_PAYLOAD_INVALID",
+                message="Telegram Stars invoice payload user id must be positive.",
+                details={"payload": payload},
+            )
+        return package_code, user_id
+
+    @staticmethod
+    def _parse_posts_package(data: str, *, prefix: str, allowed_counts: set[int]) -> int:
+        raw = data[len(prefix) :].strip()
+        try:
+            posts_count = int(raw)
+        except ValueError as exc:
+            raise ValidationError(
+                code="TELEGRAM_PAYMENT_PACKAGE_INVALID",
+                message="Payment package is invalid.",
+                details={"data": data},
+            ) from exc
+
+        if posts_count not in allowed_counts:
+            raise ValidationError(
+                code="TELEGRAM_PAYMENT_PACKAGE_INVALID",
+                message="Payment package is invalid.",
+                details={"data": data, "allowed_counts": sorted(allowed_counts)},
+            )
+        return posts_count
 
     def _validate_upload_document_metadata(
         self,
@@ -1004,12 +1570,10 @@ class TelegramPollingRuntime:
 
         language = self._resolve_update_language(update)
         text = self._build_update_error_text(language=language, error=error)
-        reply_markup = self._action_keyboard(language)
         try:
             self._gateway.send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=reply_markup,
             )
         except Exception as notification_exc:  # noqa: BLE001
             log_event(

@@ -77,7 +77,7 @@ class RunTaskGenerationUseCaseTests(unittest.TestCase):
     def _build_capture_logger(name: str) -> tuple[logging.Logger, _JsonCaptureHandler]:
         logger = logging.getLogger(name)
         logger.handlers.clear()
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.WARNING)
         logger.propagate = False
         handler = _JsonCaptureHandler()
         logger.addHandler(handler)

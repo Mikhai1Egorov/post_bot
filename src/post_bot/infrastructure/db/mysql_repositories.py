@@ -7,10 +7,12 @@ from datetime import datetime
 from typing import Any
 
 from post_bot.domain.models import (
+    ArticlePackageRecord,
     ApprovalBatchItemRecord,
     ApprovalBatchRecord,
     BalanceSnapshot,
     LedgerEntry,
+    PaymentRecord,
     PublicationRecord,
     Task,
     TaskArtifactRecord,
@@ -29,6 +31,7 @@ from post_bot.shared.enums import (
     ArtifactType,
     InterfaceLanguage,
     GenerationStatus,
+    PaymentStatus,
     PublicationStatus,
     RenderStatus,
     TaskBillingState,
@@ -740,6 +743,198 @@ class MySQLLedgerRepository(_BaseMySQLRepository):
                 entry.created_at or _db_now_naive(),
             ),
         )
+
+
+class MySQLPaymentRepository(_BaseMySQLRepository):
+    def get_or_create_article_package(
+        self,
+        *,
+        package_code: str,
+        articles_qty: int,
+        price_amount: float | None,
+        currency_code: str | None,
+    ) -> ArticlePackageRecord:
+        row = self._fetchone(
+            self._select_article_package_sql(where_for_update=True),
+            (package_code,),
+        )
+        if row is None:
+            try:
+                self._execute_insert(
+                    """
+                    INSERT INTO article_packages (
+                        package_code,
+                        articles_qty,
+                        price_amount,
+                        currency_code,
+                        is_active
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        package_code,
+                        articles_qty,
+                        price_amount,
+                        currency_code,
+                        1,
+                    ),
+                )
+            except Exception as error:
+                if not self._is_duplicate_entry_error(error):
+                    raise
+            row = self._fetchone(
+                self._select_article_package_sql(where_for_update=True),
+                (package_code,),
+            )
+        if row is None:
+            raise BusinessRuleError(
+                code="ARTICLE_PACKAGE_PERSIST_FAILED",
+                message="Unable to load article package after create.",
+                details={"package_code": package_code},
+            )
+        return self._map_article_package(row)
+
+    def get_by_provider_payment_id_for_update(self, provider_payment_id: str) -> PaymentRecord | None:
+        row = self._fetchone(
+            self._select_payment_base_sql()
+            + " WHERE p.provider_payment_id = %s ORDER BY p.id DESC LIMIT 1 FOR UPDATE",
+            (provider_payment_id,),
+        )
+        if row is None:
+            return None
+        return self._map_payment(row)
+
+    def create_paid(
+        self,
+        *,
+        user_id: int,
+        package_id: int,
+        provider_code: str,
+        provider_payment_id: str,
+        provider_invoice_id: str | None,
+        amount_value: float | None,
+        currency_code: str | None,
+        purchased_articles_qty: int,
+        raw_payload_json: dict[str, Any] | None,
+        paid_at: datetime | None,
+    ) -> PaymentRecord:
+        payment_id = self._execute_insert(
+            """
+            INSERT INTO payments (
+                user_id,
+                package_id,
+                provider_code,
+                provider_payment_id,
+                provider_invoice_id,
+                payment_status,
+                amount_value,
+                currency_code,
+                purchased_articles_qty,
+                raw_payload_json,
+                paid_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                user_id,
+                package_id,
+                provider_code,
+                provider_payment_id,
+                provider_invoice_id,
+                PaymentStatus.PAID.value,
+                amount_value,
+                currency_code,
+                purchased_articles_qty,
+                _json_dumps(raw_payload_json),
+                paid_at or _db_now_naive(),
+            ),
+        )
+        row = self._fetchone(
+            self._select_payment_base_sql() + " WHERE p.id = %s",
+            (payment_id,),
+        )
+        if row is None:
+            raise BusinessRuleError(
+                code="PAYMENT_PERSIST_FAILED",
+                message="Unable to load payment after create.",
+                details={"payment_id": payment_id},
+            )
+        return self._map_payment(row)
+
+    @staticmethod
+    def _select_article_package_sql(*, where_for_update: bool) -> str:
+        suffix = " FOR UPDATE" if where_for_update else ""
+        return (
+            """
+            SELECT
+                id,
+                package_code,
+                articles_qty,
+                price_amount,
+                currency_code,
+                is_active
+            FROM article_packages
+            WHERE package_code = %s
+            LIMIT 1
+            """
+            + suffix
+        )
+
+    @staticmethod
+    def _select_payment_base_sql() -> str:
+        return """
+            SELECT
+                p.id,
+                p.user_id,
+                p.package_id,
+                p.provider_code,
+                p.provider_payment_id,
+                p.provider_invoice_id,
+                p.payment_status,
+                p.amount_value,
+                p.currency_code,
+                p.purchased_articles_qty,
+                p.raw_payload_json,
+                p.paid_at
+            FROM payments p
+        """
+
+    @staticmethod
+    def _map_article_package(row: tuple[Any, ...]) -> ArticlePackageRecord:
+        return ArticlePackageRecord(
+            id=int(row[0]),
+            package_code=str(row[1]),
+            articles_qty=int(row[2]),
+            price_amount=float(row[3]) if row[3] is not None else None,
+            currency_code=str(row[4]) if row[4] is not None else None,
+            is_active=bool(row[5]),
+        )
+
+    @staticmethod
+    def _map_payment(row: tuple[Any, ...]) -> PaymentRecord:
+        return PaymentRecord(
+            id=int(row[0]),
+            user_id=int(row[1]),
+            package_id=int(row[2]),
+            provider_code=str(row[3]),
+            provider_payment_id=str(row[4]) if row[4] is not None else None,
+            provider_invoice_id=str(row[5]) if row[5] is not None else None,
+            payment_status=PaymentStatus(str(row[6])),
+            amount_value=float(row[7]) if row[7] is not None else None,
+            currency_code=str(row[8]) if row[8] is not None else None,
+            purchased_articles_qty=int(row[9]),
+            raw_payload_json=_json_loads(row[10]),
+            paid_at=row[11],
+        )
+
+    @staticmethod
+    def _is_duplicate_entry_error(error: Exception) -> bool:
+        errno = getattr(error, "errno", None)
+        if isinstance(errno, int) and errno == 1062:
+            return True
+        sql_state = getattr(error, "sqlstate", None)
+        if isinstance(sql_state, str) and sql_state in {"23000", "23505"}:
+            return True
+        message = str(error).lower()
+        return "duplicate entry" in message or "unique constraint" in message
 
 
 class MySQLTaskStatusHistoryRepository(_BaseMySQLRepository):

@@ -11,6 +11,7 @@ from post_bot.shared.enums import (
     ArtifactType,
     GenerationStatus,
     LedgerEntryType,
+    PaymentStatus,
     PublicationStatus,
     RenderStatus,
     TaskBillingState,
@@ -103,6 +104,32 @@ class LedgerEntry:
     task_id: int | None = None
     note_text: str | None = None
     created_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ArticlePackageRecord:
+    id: int
+    package_code: str
+    articles_qty: int
+    price_amount: float | None
+    currency_code: str | None
+    is_active: bool
+
+
+@dataclass(slots=True, frozen=True)
+class PaymentRecord:
+    id: int
+    user_id: int
+    package_id: int
+    provider_code: str
+    provider_payment_id: str | None
+    provider_invoice_id: str | None
+    payment_status: PaymentStatus
+    amount_value: float | None
+    currency_code: str | None
+    purchased_articles_qty: int
+    raw_payload_json: dict[str, Any] | None
+    paid_at: datetime | None
 
 @dataclass(slots=True, frozen=True)
 class TaskResearchSource:

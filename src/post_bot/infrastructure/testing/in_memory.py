@@ -6,13 +6,16 @@ from dataclasses import replace
 from datetime import datetime
 from io import BytesIO
 from threading import RLock
+from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from post_bot.domain.models import (
+    ArticlePackageRecord,
     ApprovalBatchItemRecord,
     ApprovalBatchRecord,
     BalanceSnapshot,
     LedgerEntry,
+    PaymentRecord,
     ParsedExcelData,
     PublicationRecord,
     Task,
@@ -32,6 +35,7 @@ from post_bot.shared.enums import (
     ArtifactType,
     InterfaceLanguage,
     GenerationStatus,
+    PaymentStatus,
     PublicationStatus,
     RenderStatus,
     TaskBillingState,
@@ -380,6 +384,85 @@ class InMemoryLedgerRepository:
 
     def append_entry(self, entry: LedgerEntry) -> None:
         self.entries.append(entry)
+
+
+class InMemoryPaymentRepository:
+    def __init__(self) -> None:
+        self._next_package_id = 1
+        self._next_payment_id = 1
+        self.packages_by_code: dict[str, ArticlePackageRecord] = {}
+        self.payments_by_id: dict[int, PaymentRecord] = {}
+        self.provider_payment_index: dict[str, int] = {}
+
+    def get_or_create_article_package(
+        self,
+        *,
+        package_code: str,
+        articles_qty: int,
+        price_amount: float | None,
+        currency_code: str | None,
+    ) -> ArticlePackageRecord:
+        existing = self.packages_by_code.get(package_code)
+        if existing is not None:
+            return existing
+
+        record = ArticlePackageRecord(
+            id=self._next_package_id,
+            package_code=package_code,
+            articles_qty=articles_qty,
+            price_amount=price_amount,
+            currency_code=currency_code,
+            is_active=True,
+        )
+        self.packages_by_code[package_code] = record
+        self._next_package_id += 1
+        return record
+
+    def get_by_provider_payment_id_for_update(self, provider_payment_id: str) -> PaymentRecord | None:
+        payment_id = self.provider_payment_index.get(provider_payment_id)
+        if payment_id is None:
+            return None
+        return self.payments_by_id.get(payment_id)
+
+    def create_paid(
+        self,
+        *,
+        user_id: int,
+        package_id: int,
+        provider_code: str,
+        provider_payment_id: str,
+        provider_invoice_id: str | None,
+        amount_value: float | None,
+        currency_code: str | None,
+        purchased_articles_qty: int,
+        raw_payload_json: dict[str, Any] | None,
+        paid_at: datetime | None,
+    ) -> PaymentRecord:
+        if provider_payment_id in self.provider_payment_index:
+            raise BusinessRuleError(
+                code="PAYMENT_PROVIDER_PAYMENT_ID_DUPLICATE",
+                message="provider_payment_id must be unique.",
+                details={"provider_payment_id": provider_payment_id},
+            )
+
+        record = PaymentRecord(
+            id=self._next_payment_id,
+            user_id=user_id,
+            package_id=package_id,
+            provider_code=provider_code,
+            provider_payment_id=provider_payment_id,
+            provider_invoice_id=provider_invoice_id,
+            payment_status=PaymentStatus.PAID,
+            amount_value=amount_value,
+            currency_code=currency_code,
+            purchased_articles_qty=purchased_articles_qty,
+            raw_payload_json=dict(raw_payload_json) if raw_payload_json is not None else None,
+            paid_at=paid_at or _db_now_naive(),
+        )
+        self.payments_by_id[self._next_payment_id] = record
+        self.provider_payment_index[provider_payment_id] = self._next_payment_id
+        self._next_payment_id += 1
+        return record
 
 
 class InMemoryTaskStatusHistoryRepository:
@@ -851,6 +934,7 @@ class InMemoryUnitOfWork:
         self.tasks = InMemoryTaskRepository()
         self.balances = InMemoryBalanceRepository()
         self.ledger = InMemoryLedgerRepository()
+        self.payments = InMemoryPaymentRepository()
         self.task_status_history = InMemoryTaskStatusHistoryRepository()
         self.research_sources = InMemoryResearchSourceRepository()
         self.generations = InMemoryGenerationRepository()

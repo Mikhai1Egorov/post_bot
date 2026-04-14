@@ -45,7 +45,7 @@ class AppConfigTests(unittest.TestCase):
             config = AppConfig.from_env()
 
         self.assertEqual(config.env, "dev")
-        self.assertEqual(config.log_level, "INFO")
+        self.assertEqual(config.log_level, "WARNING")
         self.assertEqual(config.db_host, "localhost")
         self.assertEqual(config.db_port, 3306)
         self.assertEqual(config.db_name, "postbot")
@@ -60,6 +60,14 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.outbound_timeout_seconds, 15.0)
         self.assertIsNone(config.telegram_bot_token)
         self.assertEqual(config.telegram_poll_timeout_seconds, 30)
+        self.assertIsNone(config.payment_stripe_provider_token)
+        self.assertIsNone(config.payment_stripe_secret_key)
+        self.assertIsNone(config.payment_stripe_webhook_secret)
+        self.assertIsNone(config.payment_stripe_success_url)
+        self.assertIsNone(config.payment_stripe_cancel_url)
+        self.assertIsNone(config.payment_stripe_price_id_articles_14)
+        self.assertIsNone(config.payment_stripe_price_id_articles_42)
+        self.assertIsNone(config.payment_stripe_price_id_articles_84)
 
     def test_from_env_parses_optional_settings(self) -> None:
         with patch.dict(
@@ -80,6 +88,14 @@ class AppConfigTests(unittest.TestCase):
                     "WORKER_COUNT": "8",
                     "TELEGRAM_BOT_TOKEN": "token-123",
                     "TELEGRAM_POLL_TIMEOUT_SECONDS": "45",
+                    "PAYMENT_STRIPE_PROVIDER_TOKEN": "acct_123",
+                    "PAYMENT_STRIPE_SECRET_KEY": "sk_live_123",
+                    "PAYMENT_STRIPE_WEBHOOK_SECRET": "whsec_123",
+                    "PAYMENT_STRIPE_SUCCESS_URL": "https://example.com/success",
+                    "PAYMENT_STRIPE_CANCEL_URL": "https://example.com/cancel",
+                    "PAYMENT_STRIPE_PRICE_ID_ARTICLES_14": "price_14",
+                    "PAYMENT_STRIPE_PRICE_ID_ARTICLES_42": "price_42",
+                    "PAYMENT_STRIPE_PRICE_ID_ARTICLES_84": "price_84",
                 }
             ),
             clear=True,
@@ -100,6 +116,43 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.worker_count, 8)
         self.assertEqual(config.telegram_bot_token, "token-123")
         self.assertEqual(config.telegram_poll_timeout_seconds, 45)
+        self.assertEqual(config.payment_stripe_provider_token, "acct_123")
+        self.assertEqual(config.payment_stripe_secret_key, "sk_live_123")
+        self.assertEqual(config.payment_stripe_webhook_secret, "whsec_123")
+        self.assertEqual(config.payment_stripe_success_url, "https://example.com/success")
+        self.assertEqual(config.payment_stripe_cancel_url, "https://example.com/cancel")
+        self.assertEqual(config.payment_stripe_price_id_articles_14, "price_14")
+        self.assertEqual(config.payment_stripe_price_id_articles_42, "price_42")
+        self.assertEqual(config.payment_stripe_price_id_articles_84, "price_84")
+
+    def test_from_env_supports_short_stripe_aliases(self) -> None:
+        with patch.dict(
+            os.environ,
+            _with_disabled_dotenv(
+                {
+                    "DB_HOST": "localhost",
+                    "DB_PORT": "3306",
+                    "DB_NAME": "postbot",
+                    "DB_USER": "user",
+                    "DB_PASSWORD": "pass",
+                    "STRIPE_PROVIDER_TOKEN": "acct_alias",
+                    "STRIPE_SECRET_KEY": "sk_alias",
+                    "STRIPE_WEBHOOK_SECRET": "whsec_alias",
+                    "STRIPE_PRICE_ID_14": "price_alias_14",
+                    "STRIPE_PRICE_ID_42": "price_alias_42",
+                    "STRIPE_PRICE_ID_84": "price_alias_84",
+                }
+            ),
+            clear=True,
+        ):
+            config = AppConfig.from_env()
+
+        self.assertEqual(config.payment_stripe_provider_token, "acct_alias")
+        self.assertEqual(config.payment_stripe_secret_key, "sk_alias")
+        self.assertEqual(config.payment_stripe_webhook_secret, "whsec_alias")
+        self.assertEqual(config.payment_stripe_price_id_articles_14, "price_alias_14")
+        self.assertEqual(config.payment_stripe_price_id_articles_42, "price_alias_42")
+        self.assertEqual(config.payment_stripe_price_id_articles_84, "price_alias_84")
 
     def test_from_env_loads_values_from_dotenv_file(self) -> None:
         temp_dir = _workspace_temp_dir("dotenv_load")
@@ -312,7 +365,6 @@ class AppConfigTests(unittest.TestCase):
             config.require_telegram_bot_token()
 
         self.assertEqual(context.exception.code, "CONFIG_TELEGRAM_BOT_TOKEN_REQUIRED")
-
 
 if __name__ == "__main__":
     unittest.main()

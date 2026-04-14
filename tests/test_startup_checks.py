@@ -46,6 +46,14 @@ def _config(*, openai_api_key: str | None = "sk-test") -> AppConfig:
         outbound_timeout_seconds=15.0,
         telegram_bot_token="telegram-token",
         telegram_poll_timeout_seconds=30,
+        payment_stripe_provider_token=None,
+        payment_stripe_secret_key=None,
+        payment_stripe_webhook_secret=None,
+        payment_stripe_success_url=None,
+        payment_stripe_cancel_url=None,
+        payment_stripe_price_id_articles_14=None,
+        payment_stripe_price_id_articles_42=None,
+        payment_stripe_price_id_articles_84=None,
     )
 
 

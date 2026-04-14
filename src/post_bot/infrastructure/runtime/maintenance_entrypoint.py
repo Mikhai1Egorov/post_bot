@@ -374,7 +374,7 @@ def main() -> int:
         )
         return 1 if result.failed_iterations > 0 or result.terminated_early else 0
     except AppError as error:
-        configure_logging("INFO")
+        configure_logging("WARNING")
         logger = logging.getLogger("post_bot.runtime.maintenance")
         log_event(
             logger,
@@ -386,7 +386,7 @@ def main() -> int:
         )
         return 1
     except Exception as exc:  # noqa: BLE001
-        configure_logging("INFO")
+        configure_logging("WARNING")
         logger = logging.getLogger("post_bot.runtime.maintenance")
         internal = InternalError(
             code="MAINTENANCE_ENTRYPOINT_UNEXPECTED_ERROR",

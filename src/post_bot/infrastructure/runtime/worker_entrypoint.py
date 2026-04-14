@@ -192,7 +192,7 @@ def main() -> int:
         )
         return 1 if result.failed_cycles > 0 or result.terminated_early else 0
     except AppError as error:
-        configure_logging("INFO")
+        configure_logging("WARNING")
         logger = logging.getLogger("post_bot.runtime.worker")
         log_event(
             logger,
@@ -204,7 +204,7 @@ def main() -> int:
         )
         return 1
     except Exception as exc:  # noqa: BLE001
-        configure_logging("INFO")
+        configure_logging("WARNING")
         logger = logging.getLogger("post_bot.runtime.worker")
         internal = InternalError(
             code="WORKER_ENTRYPOINT_UNEXPECTED_ERROR",
@@ -221,7 +221,7 @@ def main() -> int:
         )
         return 1
     except KeyboardInterrupt:
-        configure_logging("INFO")
+        configure_logging("WARNING")
         logger = logging.getLogger("post_bot.runtime.worker")
         log_event(
             logger,

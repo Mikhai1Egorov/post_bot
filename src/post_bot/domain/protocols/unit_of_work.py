@@ -11,6 +11,7 @@ from post_bot.domain.protocols.repositories import (
     BalanceRepository,
     GenerationRepository,
     LedgerRepository,
+    PaymentRepository,
     PublicationRepository,
     RenderRepository,
     ResearchSourceRepository,
@@ -27,6 +28,7 @@ class UnitOfWork(Protocol):
     tasks: TaskRepository
     balances: BalanceRepository
     ledger: LedgerRepository
+    payments: PaymentRepository
     task_status_history: TaskStatusHistoryRepository
     research_sources: ResearchSourceRepository
     generations: GenerationRepository
