@@ -343,6 +343,7 @@ class TelegramBotPublisher(PublisherPort):
                     response = self._gateway.send_photo(
                         chat_id=chat_id,
                         photo=photo_payload,
+                        caption=delivery.cover_caption_text or None,
                         file_name=file_name,
                     )
                 except AppError as error:
