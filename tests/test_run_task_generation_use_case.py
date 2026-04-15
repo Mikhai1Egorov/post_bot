@@ -222,6 +222,28 @@ class RunTaskGenerationUseCaseTests(unittest.TestCase):
         self.assertNotIn("{title}", record.final_prompt_text)
         self.assertNotIn("{keywords}", record.final_prompt_text)
 
+    def test_generation_passes_user_selected_response_language_even_with_foreign_title_keywords(self) -> None:
+        uow = InMemoryUnitOfWork()
+        upload_id = self._create_processing_upload(uow)
+        task = self._queued_task(upload_id=upload_id)
+        task.custom_title = "أفضل الوجبات السياحية في أوروبا هذا العام"
+        task.keywords_text = "أوروبا, سياحة, رحلات"
+        task.response_language_code = "ru"
+        uow.tasks.create_many([task])
+
+        llm = FakeLLMClient(response_text="Готовый текст статьи")
+        use_case = self._build_use_case(
+            uow=uow,
+            llm=llm,
+            research=FakeResearchClient(),
+        )
+
+        result = use_case.execute(RunTaskGenerationCommand(task_id=1, model_name="gpt-test", changed_by="worker-1"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(llm.calls[0]["response_language"], "ru")
+
     def test_logs_research_and_generation_structured_telemetry(self) -> None:
         uow = InMemoryUnitOfWork()
         upload_id = self._create_processing_upload(uow)

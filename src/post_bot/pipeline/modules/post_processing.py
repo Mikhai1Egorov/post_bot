@@ -140,15 +140,16 @@ class PostProcessingModule:
                 )
             )
 
-        if task.footer_text:
+        if task.footer_text or task.footer_link_url:
+            footer_lines = ["  <footer class=\"user-footer\">"]
+            if task.footer_text:
+                footer_lines.append(f"    <p>{escape(task.footer_text)}</p>")
             if task.footer_link_url:
-                footer = (
-                    f"  <footer class=\"user-footer\"><p>{escape(task.footer_text)} "
-                    f"<a href=\"{escape(task.footer_link_url)}\">{escape(task.footer_link_url)}</a></p></footer>"
+                footer_lines.append(
+                    f"    <p><a href=\"{escape(task.footer_link_url)}\">{escape(task.footer_link_url)}</a></p>"
                 )
-            else:
-                footer = f"  <footer class=\"user-footer\"><p>{escape(task.footer_text)}</p></footer>"
-            blocks.append(footer)
+            footer_lines.append("  </footer>")
+            blocks.append("\n".join(footer_lines))
 
         if task.scheduled_publish_at is not None:
             blocks.append(self._render_schedule(task.scheduled_publish_at))

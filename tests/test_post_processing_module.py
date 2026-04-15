@@ -74,6 +74,8 @@ Paragraph two.
         self.assertIn("class=\"user-footer\"", rendered.body_html)
         self.assertIn("schedule-at", rendered.body_html)
         self.assertIn("https://example.com", rendered.body_html)
+        self.assertIn("<p>Read more</p>", rendered.body_html)
+        self.assertIn('<p><a href="https://example.com">https://example.com</a></p>', rendered.body_html)
 
     def test_include_image_without_generated_image_does_not_render_image_block(self) -> None:
         rendered = PostProcessingModule().render(

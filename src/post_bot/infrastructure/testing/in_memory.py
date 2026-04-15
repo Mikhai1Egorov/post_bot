@@ -1018,8 +1018,16 @@ class FakeLLMClient:
     def __init__(self, *, response_text: str | None = None, error: Exception | None = None) -> None:
         self._response_text = response_text
         self._error = error
+        self.calls: list[dict[str, object]] = []
 
     def generate(self, *, model_name: str, prompt: str, response_language: str) -> str:
+        self.calls.append(
+            {
+                "model_name": model_name,
+                "prompt": prompt,
+                "response_language": response_language,
+            }
+        )
         if self._error is not None:
             raise self._error
         return self._response_text or "generated"
@@ -1047,13 +1055,15 @@ class FakeImageClient:
         task_id: int,
         article_title: str,
         article_topic: str,
-        article_lead: str | None,
+        article_keywords: str | None = None,
+        article_lead: str | None = None,
     ):
         self.calls.append(
             {
                 "task_id": task_id,
                 "article_title": article_title,
                 "article_topic": article_topic,
+                "article_keywords": article_keywords,
                 "article_lead": article_lead,
             }
         )
@@ -1065,9 +1075,10 @@ class FakeImageClient:
         return GeneratedImageAsset(
             mime_type=self._mime_type if self._image_url is None else None,
             content=self._content if self._image_url is None else None,
-            prompt_text=f"title={article_title};topic={article_topic}",
+            prompt_text=f"title={article_title};topic={article_topic};keywords={article_keywords}",
             image_url=self._image_url,
         )
+
 class FakePublisher:
     def __init__(
         self,

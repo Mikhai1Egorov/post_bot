@@ -239,6 +239,7 @@ class RunTaskRenderingUseCase:
                 task_id=task.id,
                 article_title=rendered.final_title_text,
                 article_topic=task.topic_text,
+                article_keywords=task.keywords_text,
                 article_lead=rendered.article_lead_text,
             )
             image_reference, reference_kind = self._build_image_reference(generated)

@@ -15,11 +15,16 @@ from uuid import uuid4
 
 from post_bot.application.ports import GeneratedImageAsset, ImageClientPort, LLMClientPort, ResearchClientPort
 from post_bot.domain.models import TaskResearchSource
-from post_bot.pipeline.modules.image_prompt_builder import build_editorial_image_prompt
+from post_bot.pipeline.modules.image_prompt_builder import (
+    build_editorial_image_negative_prompt,
+    build_editorial_image_prompt,
+)
 from post_bot.shared.errors import ExternalDependencyError
 
 _OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 _OPENAI_IMAGES_GENERATIONS_URL = "https://api.openai.com/v1/images/generations"
+_ASCII_PRINTABLE_MIN = 32
+_ASCII_PRINTABLE_MAX = 126
 
 
 def _extract_message_text(choice: dict[str, object]) -> str:
@@ -329,21 +334,34 @@ class OpenAIResearchClient(ResearchClientPort):
 class OpenAILLMClient(LLMClientPort):
     """Generation adapter using the same GPT provider/token."""
 
+    _LANGUAGE_NAME_BY_CODE: dict[str, str] = {
+        "en": "English",
+        "ru": "Russian",
+        "es": "Spanish",
+        "uk": "Ukrainian",
+        "zh": "Chinese",
+        "hi": "Hindi",
+        "ar": "Arabic",
+    }
+
     def __init__(self, *, api_key: str, timeout_seconds: float = 30.0) -> None:
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
         self._max_completion_tokens = 350
 
     def generate(self, *, model_name: str, prompt: str, response_language: str) -> str:
+        language_guardrail = self._build_language_guardrail(response_language)
         text = _post_chat_completion(
             api_key=self._api_key,
             model_name=model_name,
             timeout_seconds=self._timeout_seconds,
             system_prompt=(
                 "You generate publication-ready article drafts. "
-                "Follow the prompt exactly and return clean text only."
+                "Follow the prompt exactly and return clean text only. "
+                "Never switch away from the required output language."
             ),
             user_prompt=(
+                f"{language_guardrail}\n"
                 f"response_language={response_language}\n\n"
                 "Follow the task prompt below exactly:\n"
                 f"{prompt}"
@@ -357,6 +375,15 @@ class OpenAILLMClient(LLMClientPort):
                 retryable=False,
             )
         return text
+
+    def _build_language_guardrail(self, response_language: str) -> str:
+        normalized = (response_language or "").strip().lower()
+        language_name = self._LANGUAGE_NAME_BY_CODE.get(normalized, "English")
+        return (
+            f"Mandatory language rule: output the final article strictly in {language_name}. "
+            "Ignore the language used in title, keywords, and research sources. "
+            "Do not mix languages."
+        )
 
 
 class OpenAIImageClient(ImageClientPort):
@@ -386,17 +413,33 @@ class OpenAIImageClient(ImageClientPort):
             task_id: int,
             article_title: str,
             article_topic: str,
-            article_lead: str | None,
+            article_keywords: str | None = None,
+            article_lead: str | None = None,
     ) -> GeneratedImageAsset:
 
         prompt = build_editorial_image_prompt(
             article_title=article_title,
             article_topic=article_topic,
+            article_keywords=article_keywords,
             article_lead=article_lead,
         )
+        negative_prompt = build_editorial_image_negative_prompt(
+            article_title=article_title,
+            article_topic=article_topic,
+            article_keywords=article_keywords,
+            article_lead=article_lead,
+        )
+        safe_prompt = self._force_ascii_prompt(prompt, fallback="prompt: create one original editorial image without people.")
+        safe_negative_prompt = self._force_ascii_prompt(
+            negative_prompt,
+            fallback="person, people, human, face, portrait, text, logo, watermark",
+        )
+        seed = self._derive_stability_seed()
 
         status_code, content, transport = self._perform_generation_request(
-            prompt=prompt,
+            prompt=safe_prompt,
+            negative_prompt=safe_negative_prompt,
+            seed=seed,
             task_id=task_id,
         )
 
@@ -411,7 +454,9 @@ class OpenAIImageClient(ImageClientPort):
                     "endpoint": self._STABILITY_IMAGE_GENERATE_URL,
                     "transport": transport,
                     "timeout_seconds": max(self._timeout_seconds, self._MIN_IMAGE_REQUEST_TIMEOUT_SECONDS),
-                    "prompt_chars": len(prompt),
+                    "prompt_chars": len(safe_prompt),
+                    "negative_prompt_chars": len(safe_negative_prompt),
+                    "seed": seed,
                     "body": self._decode_text_preview(content, max_chars=1000),
                     "api_key_source": self._api_key_source,
                     "api_key_fingerprint": self._api_key_fingerprint,
@@ -434,7 +479,14 @@ class OpenAIImageClient(ImageClientPort):
             image_url=None,
         )
 
-    def _perform_generation_request(self, *, prompt: str, task_id: int) -> tuple[int, bytes, str]:
+    def _perform_generation_request(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        seed: int,
+        task_id: int,
+    ) -> tuple[int, bytes, str]:
         requests_module: Any | None = None
         requests_exception_type: Any | None = None
         try:
@@ -447,7 +499,16 @@ class OpenAIImageClient(ImageClientPort):
 
         timeout_seconds = max(self._timeout_seconds, self._MIN_IMAGE_REQUEST_TIMEOUT_SECONDS)
         boundary = f"----PostBotStabilityBoundary{uuid4().hex}"
-        body = self._encode_stability_multipart(prompt=prompt, boundary=boundary)
+        request_fields = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "seed": str(seed),
+            "output_format": "png",
+        }
+        body = self._encode_stability_multipart(
+            fields=request_fields,
+            boundary=boundary,
+        )
         transport = "requests" if requests_module is not None else "urllib"
 
         for attempt in range(1, self._MAX_IMAGE_REQUEST_ATTEMPTS + 1):
@@ -459,9 +520,7 @@ class OpenAIImageClient(ImageClientPort):
                             "Authorization": f"Bearer {self._api_key}",
                             "Accept": "image/*",
                         },
-                        files={
-                            "prompt": (None, prompt),
-                        },
+                        files={name: (None, value) for name, value in request_fields.items() if value},
                         timeout=timeout_seconds,
                     )
                     return (
@@ -483,6 +542,8 @@ class OpenAIImageClient(ImageClientPort):
                             "transport": transport,
                             "timeout_seconds": timeout_seconds,
                             "prompt_chars": len(prompt),
+                            "negative_prompt_chars": len(negative_prompt),
+                            "seed": seed,
                             "api_key_source": self._api_key_source,
                             "api_key_fingerprint": self._api_key_fingerprint,
                         },
@@ -523,6 +584,8 @@ class OpenAIImageClient(ImageClientPort):
                         "transport": transport,
                         "timeout_seconds": timeout_seconds,
                         "prompt_chars": len(prompt),
+                        "negative_prompt_chars": len(negative_prompt),
+                        "seed": seed,
                         "api_key_source": self._api_key_source,
                         "api_key_fingerprint": self._api_key_fingerprint,
                     },
@@ -543,6 +606,8 @@ class OpenAIImageClient(ImageClientPort):
                         "transport": transport,
                         "timeout_seconds": timeout_seconds,
                         "prompt_chars": len(prompt),
+                        "negative_prompt_chars": len(negative_prompt),
+                        "seed": seed,
                         "api_key_source": self._api_key_source,
                         "api_key_fingerprint": self._api_key_fingerprint,
                     },
@@ -562,6 +627,8 @@ class OpenAIImageClient(ImageClientPort):
                         "transport": transport,
                         "timeout_seconds": timeout_seconds,
                         "prompt_chars": len(prompt),
+                        "negative_prompt_chars": len(negative_prompt),
+                        "seed": seed,
                         "api_key_source": self._api_key_source,
                         "api_key_fingerprint": self._api_key_fingerprint,
                     },
@@ -578,6 +645,8 @@ class OpenAIImageClient(ImageClientPort):
                 "transport": transport,
                 "timeout_seconds": timeout_seconds,
                 "prompt_chars": len(prompt),
+                "negative_prompt_chars": len(negative_prompt),
+                "seed": seed,
                 "api_key_source": self._api_key_source,
                 "api_key_fingerprint": self._api_key_fingerprint,
             },
@@ -585,16 +654,36 @@ class OpenAIImageClient(ImageClientPort):
         )
 
     @staticmethod
-    def _encode_stability_multipart(*, prompt: str, boundary: str) -> bytes:
+    def _encode_stability_multipart(*, fields: dict[str, str], boundary: str) -> bytes:
         parts: list[bytes] = []
-        fields = {"prompt": prompt}
         for name, value in fields.items():
+            if not value:
+                continue
             parts.append(f"--{boundary}\r\n".encode("utf-8"))
             parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
             parts.append(value.encode("utf-8"))
             parts.append(b"\r\n")
         parts.append(f"--{boundary}--\r\n".encode("utf-8"))
         return b"".join(parts)
+
+    @staticmethod
+    def _derive_stability_seed() -> int:
+        # Random seed lowers repeated-looking outputs across different tasks.
+        return max(1, uuid4().int % 4_294_967_294)
+
+    @staticmethod
+    def _force_ascii_prompt(value: str, *, fallback: str) -> str:
+        if not value:
+            return fallback
+        normalized = " ".join(value.split())
+        filtered = "".join(
+            ch if _ASCII_PRINTABLE_MIN <= ord(ch) <= _ASCII_PRINTABLE_MAX else " "
+            for ch in normalized
+        )
+        filtered = " ".join(filtered.split())
+        if not filtered:
+            return fallback
+        return filtered
 
     @staticmethod
     def _read_http_error_body(error: HTTPError) -> str:

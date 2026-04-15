@@ -42,7 +42,10 @@ class _HttpTelegramMessageGateway:
     def __init__(self, *, bot_token: str, timeout_seconds: float) -> None:
         token = bot_token.strip()
         if not token:
-            raise ValidationError(code="TELEGRAM_BOT_TOKEN_REQUIRED", message="Telegram bot token is required.")
+            raise ValidationError(
+                code="TELEGRAM_BOT_TOKEN_REQUIRED",
+                message="Telegram bot token is required.",
+            )
         self._api_base = f"https://api.telegram.org/bot{token}"
         self._timeout_seconds = timeout_seconds
 
@@ -73,6 +76,7 @@ class _HttpTelegramMessageGateway:
             fields: dict[str, str] = {"chat_id": str(chat_id)}
             if caption:
                 fields["caption"] = caption
+
             boundary = f"----PostBotBoundary{uuid4().hex}"
             body = _encode_multipart(
                 fields=fields,
@@ -132,7 +136,11 @@ class _HttpTelegramMessageGateway:
                     "reason": reason,
                     "method": method,
                     "body": body[:1000] if body else None,
-                    "reason_type": type(getattr(exc, "reason", None)).__name__ if getattr(exc, "reason", None) is not None else None,
+                    "reason_type": (
+                        type(getattr(exc, "reason", None)).__name__
+                        if getattr(exc, "reason", None) is not None
+                        else None
+                    ),
                     "exception_type": type(exc).__name__,
                     "exception_repr": repr(exc),
                     "retry_after_seconds": retry_after_seconds,
@@ -145,9 +153,11 @@ class _HttpTelegramMessageGateway:
             reason_obj = getattr(exc, "reason", None)
             reason = str(reason_obj if reason_obj is not None else exc)
             reason_lower = reason.casefold()
-            reason_type = type(reason_obj).__name__ if reason_obj is not None else None
-            exception_type = type(exc).__name__
-            is_timeout = isinstance(reason_obj, TimeoutError) or "timed out" in reason_lower or "timeout" in reason_lower
+            is_timeout = (
+                isinstance(reason_obj, TimeoutError)
+                or "timed out" in reason_lower
+                or "timeout" in reason_lower
+            )
             code = "TELEGRAM_TIMEOUT" if is_timeout else "TELEGRAM_NETWORK_ERROR"
             message = "Telegram request timed out." if is_timeout else "Telegram network request failed."
             raise ExternalDependencyError(
@@ -157,8 +167,8 @@ class _HttpTelegramMessageGateway:
                     "status": None,
                     "body": None,
                     "reason": reason,
-                    "reason_type": reason_type,
-                    "exception_type": exception_type,
+                    "reason_type": type(reason_obj).__name__ if reason_obj is not None else None,
+                    "exception_type": type(exc).__name__,
                     "exception_repr": repr(exc),
                     "method": method,
                     "timeout_seconds": self._timeout_seconds,
@@ -213,13 +223,13 @@ class _HttpTelegramMessageGateway:
     def _read_http_error_body(error: HTTPError) -> str:
         try:
             payload = error.read()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return ""
         if not payload:
             return ""
         try:
             return payload.decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
+        except Exception:
             return ""
 
     @staticmethod
@@ -229,7 +239,7 @@ class _HttpTelegramMessageGateway:
             return None
         try:
             raw_value = headers.get("Retry-After")
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         if raw_value is None:
             return None
@@ -248,7 +258,7 @@ class _HttpTelegramMessageGateway:
             return None
         try:
             raw_value = headers.get("x-request-id")
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         if raw_value is None:
             return None
@@ -261,7 +271,10 @@ class TelegramBotPublisher(PublisherPort):
 
     _TEXT_LIMIT = 4000
     _PHOTO_CAPTION_SAFE_LIMIT = 900
-    _DATA_URI_PATTERN = re.compile(r"^data:(?P<mime>[\w.+-]+\/[\w.+-]+);base64,(?P<data>[A-Za-z0-9+/=\s]+)$", re.IGNORECASE)
+    _DATA_URI_PATTERN = re.compile(
+        r"^data:(?P<mime>[\w.+-]+/[\w.+-]+);base64,(?P<data>[A-Za-z0-9+/=\s]+)$",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -279,7 +292,10 @@ class TelegramBotPublisher(PublisherPort):
                     code="TELEGRAM_BOT_TOKEN_REQUIRED",
                     message="Telegram bot token is required.",
                 )
-            self._gateway = _HttpTelegramMessageGateway(bot_token=token, timeout_seconds=timeout_seconds)
+            self._gateway = _HttpTelegramMessageGateway(
+                bot_token=token,
+                timeout_seconds=timeout_seconds,
+            )
 
         self._delivery_projector = TelegramDeliveryProjector(
             text_limit=self._TEXT_LIMIT,
@@ -313,6 +329,7 @@ class TelegramBotPublisher(PublisherPort):
         message_delivery = delivery
         publisher_branch = "text_only"
         resolved_photo: tuple[str | bytes, str | None, str] | None = None
+
         if delivery.image_url is not None:
             resolved_photo = self._resolve_photo_payload(delivery.image_url)
             if resolved_photo is not None:
@@ -321,28 +338,38 @@ class TelegramBotPublisher(PublisherPort):
             else:
                 photo_fallback_reason = "IMAGE_PAYLOAD_UNSUPPORTED"
                 publisher_branch = "image_fallback_to_text"
-                message_delivery = self._delivery_projector.project(html=self._strip_first_image_tag(html))
+                message_delivery = self._delivery_projector.project(
+                    html=self._strip_first_image_tag(html)
+                )
 
         resume_photo_sent, resume_sent_chunk_indices, resume_external_message_id = self._extract_resume_progress(
             resume_payload_json=resume_payload_json,
             delivery_projection_hash=delivery_projection_hash,
         )
+
         if resume_external_message_id is not None:
             external_message_id = resume_external_message_id
-        sent_chunk_indices = {idx for idx in resume_sent_chunk_indices if idx < len(message_delivery.article_chunks)}
+
+        sent_chunk_indices = {
+            idx for idx in resume_sent_chunk_indices if idx < len(message_delivery.article_chunks)
+        }
 
         if resume_photo_sent:
             photo_sent = True
             sent_parts += 1
+
         sent_parts += len(sent_chunk_indices)
 
         if delivery.image_url is not None and not photo_sent:
             if resolved_photo is not None:
                 photo_payload, file_name, image_kind = resolved_photo
+                cover_caption = (delivery.cover_caption_text or "").strip()
+
                 try:
                     response = self._gateway.send_photo(
                         chat_id=chat_id,
                         photo=photo_payload,
+                        caption=None,
                         file_name=file_name,
                     )
                 except AppError as error:
@@ -365,23 +392,31 @@ class TelegramBotPublisher(PublisherPort):
                             resume_used=resume_payload_json is not None,
                         ),
                     )
+
                 photo_external_id = self._extract_message_id(response)
                 if external_message_id is None:
                     external_message_id = photo_external_id
+
                 sent_parts += 1
                 photo_sent = True
                 publisher_branch = "send_photo_then_messages"
+
             else:
                 photo_fallback_reason = "IMAGE_PAYLOAD_UNSUPPORTED"
                 publisher_branch = "image_fallback_to_text"
-                message_delivery = self._delivery_projector.project(html=self._strip_first_image_tag(html))
-                sent_chunk_indices = {idx for idx in sent_chunk_indices if idx < len(message_delivery.article_chunks)}
+                message_delivery = self._delivery_projector.project(
+                    html=self._strip_first_image_tag(html)
+                )
+                sent_chunk_indices = {
+                    idx for idx in sent_chunk_indices if idx < len(message_delivery.article_chunks)
+                }
 
         for index, chunk in enumerate(message_delivery.article_chunks):
             if not chunk.strip():
                 continue
             if index in sent_chunk_indices:
                 continue
+
             try:
                 response = self._gateway.send_message(chat_id=chat_id, text=chunk)
             except AppError as error:
@@ -404,8 +439,10 @@ class TelegramBotPublisher(PublisherPort):
                         resume_used=resume_payload_json is not None,
                     ),
                 )
+
             if external_message_id is None:
                 external_message_id = self._extract_message_id(response)
+
             sent_chunk_indices.add(index)
             sent_parts += 1
 
@@ -435,6 +472,7 @@ class TelegramBotPublisher(PublisherPort):
     def _parse_chunk_index_set(raw_indices: object) -> set[int]:
         if not isinstance(raw_indices, list):
             return set()
+
         parsed: set[int] = set()
         for item in raw_indices:
             if isinstance(item, bool):
@@ -485,9 +523,9 @@ class TelegramBotPublisher(PublisherPort):
             return str(value)
         return None
 
+    @staticmethod
     def _build_publish_payload(
-        self,
-        *,
+            *,
         channel: str,
         chat_id: int | str,
         delivery: Any,
@@ -548,7 +586,10 @@ class TelegramBotPublisher(PublisherPort):
         raise error
 
     @classmethod
-    def _resolve_photo_payload(cls, image_reference: str) -> tuple[str | bytes, str | None, str] | None:
+    def _resolve_photo_payload(
+        cls,
+        image_reference: str,
+    ) -> tuple[str | bytes, str | None, str] | None:
         raw = image_reference.strip()
         if not raw:
             return None
@@ -679,9 +720,6 @@ def _encode_multipart(
     chunks.append(b"Content-Type: application/octet-stream\r\n\r\n")
     chunks.append(file_bytes)
     chunks.append(b"\r\n")
-
     chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+
     return b"".join(chunks)
-
-
-

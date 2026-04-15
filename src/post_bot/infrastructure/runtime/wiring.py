@@ -87,9 +87,10 @@ class UnconfiguredImageClient:
         task_id: int,
         article_title: str,
         article_topic: str,
+        article_keywords: str | None,
         article_lead: str | None,
     ):
-        _ = (task_id, article_title, article_topic, article_lead)
+        _ = (task_id, article_title, article_topic, article_keywords, article_lead)
         raise ExternalDependencyError(
             code="IMAGE_API_KEY_REQUIRED",
             message="STABILITY_API_KEY is required for image generation stage.",

@@ -228,6 +228,40 @@ class ExternalAdaptersTests(unittest.TestCase):
         self.assertEqual(context.exception.code, "OPENAI_RESPONSE_INVALID")
         self.assertFalse(context.exception.retryable)
 
+    def test_llm_client_includes_strict_output_language_guardrail(self) -> None:
+        client = OpenAILLMClient(api_key="sk-test")
+        captured_payload: dict[str, object] = {}
+
+        def _capture(request, timeout=0.0):
+            del timeout
+            body = getattr(request, "data", b"") or b"{}"
+            captured_payload.update(json.loads(body.decode("utf-8")))
+            return _FakeResponse(
+                payload={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Готовый текст",
+                            }
+                        }
+                    ]
+                }
+            )
+
+        with patch("post_bot.infrastructure.external.gpt_clients.urlopen", side_effect=_capture):
+            result = client.generate(
+                model_name="gpt-test",
+                prompt="Title: AI\nKeywords: ai",
+                response_language="ru",
+            )
+
+        self.assertEqual(result, "Готовый текст")
+        messages = captured_payload.get("messages")
+        self.assertIsInstance(messages, list)
+        user_message = messages[1]["content"]  # type: ignore[index]
+        self.assertIn("strictly in Russian", str(user_message))
+        self.assertIn("Ignore the language used in title, keywords, and research sources", str(user_message))
+
     def test_telegram_http_gateway_send_message_fails_fast_on_timeout(self) -> None:
         gateway = TelegramHttpGateway(bot_token="123:abc", timeout_seconds=15)
 
@@ -338,7 +372,7 @@ class ExternalAdaptersTests(unittest.TestCase):
 
         with patch(
             "post_bot.infrastructure.external.gpt_clients.urlopen",
-            return_value=_FakeResponse(payload={"data": [{"b64_json": "ZmFrZS1wbmc="}]})
+            return_value=_FakeResponse(payload={"data": [{"b64_json": "ZmFrZS1wbmc="}]}),
         ):
             result = client.generate_cover(
                 task_id=11,
