@@ -267,11 +267,7 @@ class PublishTaskUseCase:
                     {
                         "resolved_chat_id": payload.get("resolved_chat_id"),
                         "publisher_branch": payload.get("publisher_branch"),
-                        "photo_sent": payload.get("photo_sent"),
-                        "image_delivery_kind": payload.get("image_delivery_kind"),
-                        "image_fallback_reason": payload.get("image_fallback_reason"),
                         "article_text_chars": payload.get("article_text_chars"),
-                        "cover_caption_chars": payload.get("cover_caption_chars"),
                         "article_chunks_count": payload.get("article_chunks_count"),
                     }
                 )
@@ -406,10 +402,7 @@ class PublishTaskUseCase:
                 "telegram_exception_repr": error_diagnostics.get("telegram_exception_repr"),
                 "resolved_chat_id": error_diagnostics.get("resolved_chat_id"),
                 "publisher_branch": error_diagnostics.get("publisher_branch"),
-                "photo_sent": error_diagnostics.get("photo_sent"),
-                "image_delivery_kind": error_diagnostics.get("image_delivery_kind"),
                 "article_text_chars": error_diagnostics.get("article_text_chars"),
-                "cover_caption_chars": error_diagnostics.get("cover_caption_chars"),
                 "article_chunks_count": error_diagnostics.get("article_chunks_count"),
                 "polling_conflict_suspected": error_diagnostics.get("polling_conflict_suspected"),
             },
@@ -493,10 +486,7 @@ class PublishTaskUseCase:
             "telegram_exception_repr": exception_repr_text,
             "resolved_chat_id": payload.get("resolved_chat_id"),
             "publisher_branch": payload.get("publisher_branch"),
-            "photo_sent": payload.get("photo_sent"),
-            "image_delivery_kind": payload.get("image_delivery_kind"),
             "article_text_chars": payload.get("article_text_chars"),
-            "cover_caption_chars": payload.get("cover_caption_chars"),
             "article_chunks_count": payload.get("article_chunks_count"),
             "polling_conflict_suspected": polling_conflict_suspected,
         }

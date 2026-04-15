@@ -22,7 +22,6 @@ class AppConfig:
     worker_count: int
     default_interface_language: InterfaceLanguage
     openai_api_key: str | None
-    stability_api_key: str | None
     openai_research_model: str
     openai_generation_model: str
     outbound_timeout_seconds: float
@@ -36,7 +35,6 @@ class AppConfig:
     payment_stripe_price_id_articles_14: str | None
     payment_stripe_price_id_articles_42: str | None
     payment_stripe_price_id_articles_84: str | None
-    openai_image_model: str = "gpt-image-1"
 
     @classmethod
     def from_env(cls) -> 'AppConfig':
@@ -136,10 +134,8 @@ class AppConfig:
             worker_count=worker_count,
             default_interface_language=locale,
             openai_api_key=_optional_trimmed("OPENAI_API_KEY"),
-            stability_api_key=_optional_trimmed("STABILITY_API_KEY"),
             openai_research_model=_required_trimmed("OPENAI_RESEARCH_MODEL", default_value="gpt-4.1-mini"),
             openai_generation_model=_required_trimmed("OPENAI_GENERATION_MODEL", default_value="gpt-4.1-mini"),
-            openai_image_model=_required_trimmed("OPENAI_IMAGE_MODEL", default_value="gpt-image-1"),
             outbound_timeout_seconds=outbound_timeout_seconds,
             telegram_bot_token=_optional_trimmed("TELEGRAM_BOT_TOKEN"),
             telegram_poll_timeout_seconds=telegram_poll_timeout_seconds,

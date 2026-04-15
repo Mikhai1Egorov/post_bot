@@ -13,10 +13,8 @@ from typing import Callable
 class TelegramDeliveryProjection:
     final_title_text: str
     article_lead_text: str
-    cover_caption_text: str | None
     telegram_article_body_text: str
     article_chunks: tuple[str, ...]
-    image_url: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,10 +27,6 @@ class TelegramDeliveryProjector:
     """Builds a Telegram-ready projection from canonical HTML artifacts."""
 
     _SERVICE_PREFIXES = (
-        "изображение:",
-        "image:",
-        "image placeholder",
-        "[image placeholder",
         "technical metadata",
         "render timestamp",
         "timestamp:",
@@ -44,9 +38,8 @@ class TelegramDeliveryProjector:
         "these trends highlight the growing impact of artificial intelligence",
     )
 
-    def __init__(self, *, text_limit: int = 4000, caption_safe_limit: int = 900) -> None:
+    def __init__(self, *, text_limit: int = 4000) -> None:
         self._text_limit = max(64, text_limit)
-        self._caption_safe_limit = max(128, min(caption_safe_limit, 1024))
 
     def project(self, *, html: str) -> TelegramDeliveryProjection:
         parser = _ArticleHtmlParser()
@@ -61,25 +54,17 @@ class TelegramDeliveryProjector:
         body_blocks = self._drop_service_blocks(body_blocks)
         lead = self._extract_lead(body_blocks, fallback_title=title)
 
-        # Keep full article body for Telegram message delivery.
-        # Image caption is an additional cover block and must not remove paragraphs from article chunks.
         article_blocks = [_ArticleBlock(kind="h1", text=title), *body_blocks]
         article_blocks = self._drop_service_blocks(article_blocks)
 
         body_text = self._render_blocks(article_blocks)
         chunks = tuple(self._chunk_by_h2(article_blocks)) if article_blocks else tuple()
 
-        caption = None
-        if parser.image_url is not None:
-            caption = self._build_cover_caption(title=title, lead=lead)
-
         return TelegramDeliveryProjection(
             final_title_text=title,
             article_lead_text=lead,
-            cover_caption_text=caption,
             telegram_article_body_text=body_text,
             article_chunks=chunks,
-            image_url=parser.image_url,
         )
 
     @staticmethod
@@ -105,32 +90,6 @@ class TelegramDeliveryProjector:
             if block.kind == "li" and block.text:
                 return block.text
         return fallback_title
-
-    def _build_cover_caption(self, *, title: str, lead: str) -> str:
-        clean_title = self._clean_text(title)
-        clean_lead = self._clean_text(lead)
-        if not clean_title:
-            clean_title = "Article"
-
-        if not clean_lead or clean_lead.casefold() == clean_title.casefold():
-            return self._truncate_with_ellipsis(clean_title, self._caption_safe_limit)
-
-        base = f"{clean_title}\n\n{clean_lead}"
-        if len(base) <= self._caption_safe_limit:
-            return base
-
-        title_part = self._truncate_with_ellipsis(clean_title, self._caption_safe_limit)
-        if len(title_part) >= self._caption_safe_limit - 20:
-            return title_part
-
-        remaining = self._caption_safe_limit - len(title_part) - 2
-        if remaining <= 0:
-            return title_part
-
-        lead_part = self._truncate_with_ellipsis(clean_lead, remaining)
-        if not lead_part:
-            return title_part
-        return f"{title_part}\n\n{lead_part}"
 
     def _drop_service_blocks(self, blocks: list[_ArticleBlock]) -> list[_ArticleBlock]:
         filtered = [block for block in blocks if not self._is_service_block(block)]
@@ -347,23 +306,6 @@ class TelegramDeliveryProjector:
         return [chunk for chunk in chunks if chunk.strip()]
 
     @staticmethod
-    def _truncate_with_ellipsis(text: str, limit: int) -> str:
-        normalized = TelegramDeliveryProjector._clean_text(text)
-        if len(normalized) <= limit:
-            return normalized
-        if limit <= 1:
-            return normalized[:limit]
-
-        cut = normalized[: limit - 1]
-        split_index = cut.rfind(" ")
-        if split_index >= int((limit - 1) * 0.6):
-            cut = cut[:split_index]
-        cut = cut.rstrip(" ,.;:-")
-        if not cut:
-            cut = normalized[: limit - 1]
-        return f"{cut}…"
-
-    @staticmethod
     def _clean_text(value: str) -> str:
         text = unescape(value or "")
         text = re.sub(r"\s+", " ", text)
@@ -392,7 +334,6 @@ class _ArticleHtmlParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.blocks: list[_ArticleBlock] = []
-        self.image_url: str | None = None
         self._active_tag: str | None = None
         self._buffer: list[str] = []
         self._skip_stack: list[str] = []
@@ -406,12 +347,6 @@ class _ArticleHtmlParser(HTMLParser):
 
         if self._skip_stack:
             return
-
-        if tag_lower == "img" and self.image_url is None:
-            attributes = {key.lower(): value for key, value in attrs}
-            src = (attributes.get("src") or "").strip()
-            if src and src != "{{image_url}}":
-                self.image_url = src
 
         if tag_lower in self._TEXT_TAGS and self._active_tag is None:
             self._active_tag = tag_lower

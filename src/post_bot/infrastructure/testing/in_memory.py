@@ -1034,51 +1034,6 @@ class FakeLLMClient:
 
 
 
-class FakeImageClient:
-    def __init__(
-        self,
-        *,
-        mime_type: str = "image/png",
-        content: bytes | None = None,
-        error: Exception | None = None,
-        image_url: str | None = None,
-    ) -> None:
-        self._mime_type = mime_type
-        self._content = content if content is not None else b"fake-image"
-        self._error = error
-        self._image_url = image_url
-        self.calls: list[dict[str, object]] = []
-
-    def generate_cover(
-        self,
-        *,
-        task_id: int,
-        article_title: str,
-        article_topic: str,
-        article_keywords: str | None = None,
-        article_lead: str | None = None,
-    ):
-        self.calls.append(
-            {
-                "task_id": task_id,
-                "article_title": article_title,
-                "article_topic": article_topic,
-                "article_keywords": article_keywords,
-                "article_lead": article_lead,
-            }
-        )
-        if self._error is not None:
-            raise self._error
-
-        from post_bot.application.ports import GeneratedImageAsset
-
-        return GeneratedImageAsset(
-            mime_type=self._mime_type if self._image_url is None else None,
-            content=self._content if self._image_url is None else None,
-            prompt_text=f"title={article_title};topic={article_topic};keywords={article_keywords}",
-            image_url=self._image_url,
-        )
-
 class FakePublisher:
     def __init__(
         self,

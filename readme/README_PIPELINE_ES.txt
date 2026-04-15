@@ -116,6 +116,7 @@ que ahorra 💸dinero, ⏱️tiempo y 📈escala tu proyecto
             --> botón [Descargar archivo] -  recibirás un archivo ZIP con todos los artículos. Después de pulsar [Descargar archivo] podrás
                 revisar los artículos manualmente y subirlos a tus canales tú mismo, editados por ti o tal como están.
             Después de pulsar [Descargar archivo] la tarea se considera completada.
+            💡 **Abre el archivo HTML en el navegador para una mejor legibilidad**
             EJEMPLO: 31:12:2026 23:59 - en ese momento el bot ofrecerá publicar o descargar ZIP
 
    💥 ¡IMPORTANTE! Si en ~10 minutos no tomas una decisión —

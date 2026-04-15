@@ -50,26 +50,6 @@ class LLMClientPort(Protocol):
     def generate(self, *, model_name: str, prompt: str, response_language: str) -> str: ...
 
 
-@dataclass(slots=True, frozen=True)
-class GeneratedImageAsset:
-    mime_type: str | None
-    content: bytes | None
-    prompt_text: str
-    image_url: str | None = None
-
-
-class ImageClientPort(Protocol):
-    def generate_cover(
-            self,
-            *,
-            task_id: int,
-            article_title: str,
-            article_topic: str,
-            article_lead: str | None,
-            article_keywords: str | None,
-    ) -> GeneratedImageAsset: ...
-
-
 class PublisherPort(Protocol):
     def publish(
             self,

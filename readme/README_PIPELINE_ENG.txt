@@ -116,6 +116,7 @@ that saves 💸money, ⏱️time and 📈scales your project
             --> button [Download archive] -  you will receive a ZIP archive with all articles. After clicking [Download archive] you can
                 manually check the articles, and upload them to your channels yourself, edited by you or as they are.
             After clicking [Download archive] the task is considered completed.
+            💡 **Open the HTML file in a browser for better readability**
             EXAMPLE: 31:12:2026 23:59 - at this time the bot will offer to publish or download ZIP
 
    💥 IMPORTANT! If within ~10 minutes you do not make a decision —

@@ -19,7 +19,6 @@ def make_task_from_config(*, upload_id: int, user_id: int, config: NormalizedTas
         response_language_code=config.response_language,
         style_code="",
         content_length_code="",
-        include_image_flag=config.include_image,
         footer_text=config.footer_text,
         footer_link_url=config.footer_link,
         scheduled_publish_at=config.schedule_at,

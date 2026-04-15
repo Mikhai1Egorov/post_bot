@@ -44,11 +44,6 @@ class ContentLength(StrEnum):
     LONG = "long"
 
 
-class IncludeImageExcelValue(StrEnum):
-    TRUE = "TRUE"
-    FALSE = "FALSE"
-
-
 class PublishMode(StrEnum):
     INSTANT = "instant"
     APPROVAL = "approval"

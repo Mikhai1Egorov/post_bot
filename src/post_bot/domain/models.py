@@ -64,7 +64,6 @@ class Task:
     response_language_code: str
     style_code: str
     content_length_code: str
-    include_image_flag: bool
     footer_text: str | None
     footer_link_url: str | None
     scheduled_publish_at: datetime | None
@@ -228,7 +227,6 @@ class NormalizedTaskConfig:
     title: str
     keywords: str
     response_language: str
-    include_image: bool
     footer_text: str | None
     footer_link: str | None
     schedule_at: datetime | None

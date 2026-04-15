@@ -14,7 +14,6 @@ class PreparedTaskPayload:
     title: str
     keywords: str
     response_language: str
-    include_image: bool
     footer_text: str | None
     footer_link: str | None
     schedule_at_iso: str | None
@@ -43,7 +42,6 @@ class PreparationModule:
             title=task.custom_title,
             keywords=task.keywords_text,
             response_language=task.response_language_code,
-            include_image=task.include_image_flag,
             footer_text=task.footer_text,
             footer_link=task.footer_link_url,
             schedule_at_iso=task.scheduled_publish_at.isoformat() if task.scheduled_publish_at else None,

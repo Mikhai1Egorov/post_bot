@@ -8,7 +8,6 @@ from pathlib import Path
 
 from post_bot.application.ports import (
     ArtifactStoragePort,
-    ImageClientPort,
     LLMClientPort,
     PublisherPort,
     ResearchClientPort,
@@ -31,7 +30,6 @@ from post_bot.domain.protocols.unit_of_work import UnitOfWork
 from post_bot.infrastructure.db.mysql_uow import build_mysql_uow
 from post_bot.infrastructure.external import (
     LocalArtifactPublisher,
-    OpenAIImageClient,
     OpenAILLMClient,
     OpenAIResearchClient,
     TelegramBotPublisher,
@@ -78,26 +76,6 @@ class UnconfiguredLLMClient:
         )
 
 
-class UnconfiguredImageClient:
-    """Explicitly fails when image provider token is not configured."""
-
-    def generate_cover(
-        self,
-        *,
-        task_id: int,
-        article_title: str,
-        article_topic: str,
-        article_keywords: str | None,
-        article_lead: str | None,
-    ):
-        _ = (task_id, article_title, article_topic, article_keywords, article_lead)
-        raise ExternalDependencyError(
-            code="IMAGE_API_KEY_REQUIRED",
-            message="STABILITY_API_KEY is required for image generation stage.",
-            retryable=False,
-        )
-
-
 @dataclass(slots=True, frozen=True)
 class RuntimeWiring:
     """Resolved runtime dependencies with explicit ownership."""
@@ -106,7 +84,6 @@ class RuntimeWiring:
     artifact_storage: ArtifactStoragePort
     research_client: ResearchClientPort
     llm_client: LLMClientPort
-    image_client: ImageClientPort
     publisher: PublisherPort
 
 
@@ -117,7 +94,6 @@ def build_default_runtime_wiring(
     data_dir: str | Path | None = None,
     research_client: ResearchClientPort | None = None,
     llm_client: LLMClientPort | None = None,
-    image_client: ImageClientPort | None = None,
     publisher: PublisherPort | None = None,
 ) -> RuntimeWiring:
     root = Path(project_root)
@@ -134,7 +110,6 @@ def build_default_runtime_wiring(
         artifact_storage=LocalFileStorage(storage_root),
         research_client=research_client or _build_research_client(config),
         llm_client=llm_client or _build_llm_client(config),
-        image_client=image_client or _build_image_client(config),
         publisher=publisher or _build_publisher(config),
     )
 
@@ -154,18 +129,6 @@ def _build_llm_client(config: AppConfig) -> LLMClientPort:
         return UnconfiguredLLMClient()
     return OpenAILLMClient(
         api_key=config.openai_api_key,
-        timeout_seconds=config.outbound_timeout_seconds,
-    )
-
-
-def _build_image_client(config: AppConfig) -> ImageClientPort:
-    image_api_key = config.stability_api_key
-    if not image_api_key:
-        return UnconfiguredImageClient()
-    return OpenAIImageClient(
-        api_key=image_api_key,
-        model_name=config.openai_image_model,
-        api_key_source="STABILITY_API_KEY",
         timeout_seconds=config.outbound_timeout_seconds,
     )
 
@@ -192,7 +155,6 @@ def build_worker_runtime(*, wiring: RuntimeWiring, logger: logging.Logger) -> Wo
         uow=wiring.uow,
         artifact_storage=wiring.artifact_storage,
         post_processing=PostProcessingModule(),
-        image_client=wiring.image_client,
         logger=logger.getChild("rendering"),
     )
     publish = PublishTaskUseCase(

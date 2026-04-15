@@ -1,30 +1,18 @@
-﻿"""OpenAI-backed adapters for research, text generation and image generation."""
+﻿"""OpenAI-backed adapters for research and text generation."""
 
 from __future__ import annotations
 
-import base64
-import binascii
 from datetime import UTC, datetime
-import hashlib
 import json
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
 from urllib.request import Request, urlopen
-from uuid import uuid4
 
-from post_bot.application.ports import GeneratedImageAsset, ImageClientPort, LLMClientPort, ResearchClientPort
+from post_bot.application.ports import LLMClientPort, ResearchClientPort
 from post_bot.domain.models import TaskResearchSource
-from post_bot.pipeline.modules.image_prompt_builder import (
-    build_editorial_image_negative_prompt,
-    build_editorial_image_prompt,
-)
 from post_bot.shared.errors import ExternalDependencyError
 
 _OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
-_OPENAI_IMAGES_GENERATIONS_URL = "https://api.openai.com/v1/images/generations"
-_ASCII_PRINTABLE_MIN = 32
-_ASCII_PRINTABLE_MAX = 126
 
 
 def _extract_message_text(choice: dict[str, object]) -> str:
@@ -66,15 +54,19 @@ def _post_chat_completion(
         user_prompt: str,
         timeout_seconds: float,
         max_completion_tokens: int | None = None,
+        temperature: float = 0.2,
+        top_p: float | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "model": model_name,
-        "temperature": 0.2,
+        "temperature": temperature,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     }
+    if top_p is not None:
+        payload["top_p"] = top_p
     if max_completion_tokens is not None:
         payload["max_completion_tokens"] = max_completion_tokens
 
@@ -347,7 +339,10 @@ class OpenAILLMClient(LLMClientPort):
     def __init__(self, *, api_key: str, timeout_seconds: float = 30.0) -> None:
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
-        self._max_completion_tokens = 350
+        # Safe completion range to avoid cutoff while keeping output bounded.
+        self._max_completion_tokens = 1200
+        self._temperature = 0.8
+        self._top_p = 0.9
 
     def generate(self, *, model_name: str, prompt: str, response_language: str) -> str:
         language_guardrail = self._build_language_guardrail(response_language)
@@ -367,6 +362,8 @@ class OpenAILLMClient(LLMClientPort):
                 f"{prompt}"
             ),
             max_completion_tokens=self._max_completion_tokens,
+            temperature=self._temperature,
+            top_p=self._top_p,
         )
         if not text.strip():
             raise ExternalDependencyError(
@@ -385,328 +382,3 @@ class OpenAILLMClient(LLMClientPort):
             "Do not mix languages."
         )
 
-
-class OpenAIImageClient(ImageClientPort):
-    _DEFAULT_IMAGE_MIME = "image/png"
-    _MIN_IMAGE_REQUEST_TIMEOUT_SECONDS = 45.0
-    _MAX_IMAGE_REQUEST_ATTEMPTS = 2
-    _STABILITY_IMAGE_GENERATE_URL = "https://api.stability.ai/v2beta/stable-image/generate/core"
-
-    def __init__(
-            self,
-            *,
-            api_key: str,
-            model_name: str | None = None,
-            api_key_source: str | None = None,
-            timeout_seconds: float = 30.0,
-    ) -> None:
-        self._api_key = api_key
-        # Backward-compatible constructor argument: wiring may still provide model_name.
-        self._model_name = (model_name or "").strip() or None
-        self._api_key_source = (api_key_source or "unknown").strip() or "unknown"
-        self._api_key_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
-        self._timeout_seconds = timeout_seconds
-
-    def generate_cover(
-            self,
-            *,
-            task_id: int,
-            article_title: str,
-            article_topic: str,
-            article_keywords: str | None = None,
-            article_lead: str | None = None,
-    ) -> GeneratedImageAsset:
-
-        prompt = build_editorial_image_prompt(
-            article_title=article_title,
-            article_topic=article_topic,
-            article_keywords=article_keywords,
-            article_lead=article_lead,
-        )
-        negative_prompt = build_editorial_image_negative_prompt(
-            article_title=article_title,
-            article_topic=article_topic,
-            article_keywords=article_keywords,
-            article_lead=article_lead,
-        )
-        safe_prompt = self._force_ascii_prompt(prompt, fallback="prompt: create one original editorial image without people.")
-        safe_negative_prompt = self._force_ascii_prompt(
-            negative_prompt,
-            fallback="person, people, human, face, portrait, text, logo, watermark",
-        )
-        seed = self._derive_stability_seed()
-
-        status_code, content, transport = self._perform_generation_request(
-            prompt=safe_prompt,
-            negative_prompt=safe_negative_prompt,
-            seed=seed,
-            task_id=task_id,
-        )
-
-        if status_code >= 400:
-            raise ExternalDependencyError(
-                code="STABILITY_HTTP_ERROR",
-                message="Stability API error",
-                details={
-                    "status_code": status_code,
-                    "task_id": task_id,
-                    "image_model": self._model_name,
-                    "endpoint": self._STABILITY_IMAGE_GENERATE_URL,
-                    "transport": transport,
-                    "timeout_seconds": max(self._timeout_seconds, self._MIN_IMAGE_REQUEST_TIMEOUT_SECONDS),
-                    "prompt_chars": len(safe_prompt),
-                    "negative_prompt_chars": len(safe_negative_prompt),
-                    "seed": seed,
-                    "body": self._decode_text_preview(content, max_chars=1000),
-                    "api_key_source": self._api_key_source,
-                    "api_key_fingerprint": self._api_key_fingerprint,
-                },
-                retryable=status_code >= 500,
-            )
-
-        if not content:
-            raise ExternalDependencyError(
-                code="STABILITY_EMPTY_RESPONSE",
-                message="Empty image response",
-                details={"task_id": task_id, "image_model": self._model_name},
-                retryable=False,
-            )
-
-        return GeneratedImageAsset(
-            mime_type=self._DEFAULT_IMAGE_MIME,
-            content=content,
-            prompt_text=prompt,
-            image_url=None,
-        )
-
-    def _perform_generation_request(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str,
-        seed: int,
-        task_id: int,
-    ) -> tuple[int, bytes, str]:
-        requests_module: Any | None = None
-        requests_exception_type: Any | None = None
-        try:
-            import requests as _requests  # type: ignore
-            requests_module = _requests
-            requests_exception_type = _requests.RequestException
-        except Exception:  # noqa: BLE001
-            requests_module = None
-            requests_exception_type = None
-
-        timeout_seconds = max(self._timeout_seconds, self._MIN_IMAGE_REQUEST_TIMEOUT_SECONDS)
-        boundary = f"----PostBotStabilityBoundary{uuid4().hex}"
-        request_fields = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "seed": str(seed),
-            "output_format": "png",
-        }
-        body = self._encode_stability_multipart(
-            fields=request_fields,
-            boundary=boundary,
-        )
-        transport = "requests" if requests_module is not None else "urllib"
-
-        for attempt in range(1, self._MAX_IMAGE_REQUEST_ATTEMPTS + 1):
-            if requests_module is not None:
-                try:
-                    response = requests_module.post(
-                        self._STABILITY_IMAGE_GENERATE_URL,
-                        headers={
-                            "Authorization": f"Bearer {self._api_key}",
-                            "Accept": "image/*",
-                        },
-                        files={name: (None, value) for name, value in request_fields.items() if value},
-                        timeout=timeout_seconds,
-                    )
-                    return (
-                        int(getattr(response, "status_code", 0) or 0),
-                        bytes(getattr(response, "content", b"") or b""),
-                        transport,
-                    )
-                except requests_exception_type as exc:  # type: ignore[misc]
-                    if attempt < self._MAX_IMAGE_REQUEST_ATTEMPTS:
-                        continue
-                    raise ExternalDependencyError(
-                        code="STABILITY_NETWORK_ERROR",
-                        message="Stability API unreachable",
-                        details={
-                            "reason": str(exc),
-                            "task_id": task_id,
-                            "image_model": self._model_name,
-                            "endpoint": self._STABILITY_IMAGE_GENERATE_URL,
-                            "transport": transport,
-                            "timeout_seconds": timeout_seconds,
-                            "prompt_chars": len(prompt),
-                            "negative_prompt_chars": len(negative_prompt),
-                            "seed": seed,
-                            "api_key_source": self._api_key_source,
-                            "api_key_fingerprint": self._api_key_fingerprint,
-                        },
-                        retryable=True,
-                    ) from exc
-
-            try:
-                request = Request(
-                    url=self._STABILITY_IMAGE_GENERATE_URL,
-                    data=body,
-                    method="POST",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Accept": "image/*",
-                        "Content-Type": f"multipart/form-data; boundary={boundary}",
-                        "User-Agent": "post-bot/1.0",
-                    },
-                )
-                with urlopen(request, timeout=timeout_seconds) as response:  # nosec: B310
-                    status_code = int(getattr(response, "status", 200) or 200)
-                    return status_code, response.read(), transport
-            except HTTPError as exc:
-                status_code = int(getattr(exc, "code", 0) or 0)
-                retryable = status_code == 429 or status_code >= 500
-                if retryable and attempt < self._MAX_IMAGE_REQUEST_ATTEMPTS:
-                    continue
-
-                raise ExternalDependencyError(
-                    code="STABILITY_HTTP_ERROR",
-                    message="Stability API error",
-                    details={
-                        "status_code": status_code,
-                        "reason": str(getattr(exc, "reason", "")),
-                        "body": self._read_http_error_body(exc)[:1000],
-                        "task_id": task_id,
-                        "image_model": self._model_name,
-                        "endpoint": self._STABILITY_IMAGE_GENERATE_URL,
-                        "transport": transport,
-                        "timeout_seconds": timeout_seconds,
-                        "prompt_chars": len(prompt),
-                        "negative_prompt_chars": len(negative_prompt),
-                        "seed": seed,
-                        "api_key_source": self._api_key_source,
-                        "api_key_fingerprint": self._api_key_fingerprint,
-                    },
-                    retryable=retryable,
-                ) from exc
-            except URLError as exc:
-                if attempt < self._MAX_IMAGE_REQUEST_ATTEMPTS:
-                    continue
-
-                raise ExternalDependencyError(
-                    code="STABILITY_NETWORK_ERROR",
-                    message="Stability API unreachable",
-                    details={
-                        "reason": str(exc),
-                        "task_id": task_id,
-                        "image_model": self._model_name,
-                        "endpoint": self._STABILITY_IMAGE_GENERATE_URL,
-                        "transport": transport,
-                        "timeout_seconds": timeout_seconds,
-                        "prompt_chars": len(prompt),
-                        "negative_prompt_chars": len(negative_prompt),
-                        "seed": seed,
-                        "api_key_source": self._api_key_source,
-                        "api_key_fingerprint": self._api_key_fingerprint,
-                    },
-                    retryable=True,
-                ) from exc
-            except TimeoutError as exc:
-                if attempt < self._MAX_IMAGE_REQUEST_ATTEMPTS:
-                    continue
-                raise ExternalDependencyError(
-                    code="STABILITY_NETWORK_ERROR",
-                    message="Stability API unreachable",
-                    details={
-                        "reason": str(exc),
-                        "task_id": task_id,
-                        "image_model": self._model_name,
-                        "endpoint": self._STABILITY_IMAGE_GENERATE_URL,
-                        "transport": transport,
-                        "timeout_seconds": timeout_seconds,
-                        "prompt_chars": len(prompt),
-                        "negative_prompt_chars": len(negative_prompt),
-                        "seed": seed,
-                        "api_key_source": self._api_key_source,
-                        "api_key_fingerprint": self._api_key_fingerprint,
-                    },
-                    retryable=True,
-                ) from exc
-
-        raise ExternalDependencyError(
-            code="STABILITY_NETWORK_ERROR",
-            message="Stability API unreachable",
-            details={
-                "task_id": task_id,
-                "image_model": self._model_name,
-                "endpoint": self._STABILITY_IMAGE_GENERATE_URL,
-                "transport": transport,
-                "timeout_seconds": timeout_seconds,
-                "prompt_chars": len(prompt),
-                "negative_prompt_chars": len(negative_prompt),
-                "seed": seed,
-                "api_key_source": self._api_key_source,
-                "api_key_fingerprint": self._api_key_fingerprint,
-            },
-            retryable=True,
-        )
-
-    @staticmethod
-    def _encode_stability_multipart(*, fields: dict[str, str], boundary: str) -> bytes:
-        parts: list[bytes] = []
-        for name, value in fields.items():
-            if not value:
-                continue
-            parts.append(f"--{boundary}\r\n".encode("utf-8"))
-            parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-            parts.append(value.encode("utf-8"))
-            parts.append(b"\r\n")
-        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
-        return b"".join(parts)
-
-    @staticmethod
-    def _derive_stability_seed() -> int:
-        # Random seed lowers repeated-looking outputs across different tasks.
-        return max(1, uuid4().int % 4_294_967_294)
-
-    @staticmethod
-    def _force_ascii_prompt(value: str, *, fallback: str) -> str:
-        if not value:
-            return fallback
-        normalized = " ".join(value.split())
-        filtered = "".join(
-            ch if _ASCII_PRINTABLE_MIN <= ord(ch) <= _ASCII_PRINTABLE_MAX else " "
-            for ch in normalized
-        )
-        filtered = " ".join(filtered.split())
-        if not filtered:
-            return fallback
-        return filtered
-
-    @staticmethod
-    def _read_http_error_body(error: HTTPError) -> str:
-        try:
-            payload = error.read()
-        except Exception:  # noqa: BLE001
-            return ""
-        if not payload:
-            return ""
-        try:
-            return payload.decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            return ""
-
-    @staticmethod
-    def _decode_text_preview(payload: bytes, *, max_chars: int) -> str | None:
-        if not payload:
-            return None
-        try:
-            text = payload.decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            return None
-        text = text.strip()
-        if not text:
-            return None
-        return text[:max_chars]

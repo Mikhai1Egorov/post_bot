@@ -24,8 +24,6 @@ class PostProcessingModule:
     """Converts generated raw text into canonical HTML artifact."""
 
     _SERVICE_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
-        re.compile(r"^\[\s*image\s+placeholder\b.*\]\s*$", re.IGNORECASE),
-        re.compile(r"^image\s+placeholder\b.*$", re.IGNORECASE),
         re.compile(r"^for\s+more\s+insights\b.*$", re.IGNORECASE),
         re.compile(r"^visit\s+the\s+full\s+report\b.*$", re.IGNORECASE),
         re.compile(
@@ -34,7 +32,7 @@ class PostProcessingModule:
         ),
     )
 
-    def render(self, *, task: Task, raw_output_text: str, image_url: str | None = None) -> RenderedContent:
+    def render(self, *, task: Task, raw_output_text: str) -> RenderedContent:
         normalized_output = self._normalize_raw_output(raw_output_text)
         lines = [line.strip() for line in normalized_output.splitlines() if line.strip()]
         lines = self._drop_service_lines(lines)
@@ -48,7 +46,7 @@ class PostProcessingModule:
         title, body_lines = self._extract_title(lines)
         lead = self._extract_lead(body_lines)
         html_body = self._render_body_lines(body_lines)
-        html_body = self._inject_optional_blocks(task=task, html_body=html_body, image_url=image_url)
+        html_body = self._inject_optional_blocks(task=task, html_body=html_body)
 
         document = "\n".join(["<article>", f"  <h1>{escape(title)}</h1>", html_body, "</article>"])
 
@@ -125,20 +123,8 @@ class PostProcessingModule:
 
         return "\n".join(html_lines)
 
-    def _inject_optional_blocks(self, *, task: Task, html_body: str, image_url: str | None) -> str:
+    def _inject_optional_blocks(self, *, task: Task, html_body: str) -> str:
         blocks: list[str] = [html_body]
-
-        if task.include_image_flag and image_url:
-            image_alt = task.topic_text.strip() or "Article image"
-            blocks.append(
-                "\n".join(
-                    [
-                        "  <figure class=\"image-block\">",
-                        f"    <img src=\"{escape(image_url, quote=True)}\" alt=\"{escape(image_alt)}\" />",
-                        "  </figure>",
-                    ]
-                )
-            )
 
         if task.footer_text or task.footer_link_url:
             footer_lines = ["  <footer class=\"user-footer\">"]
@@ -185,7 +171,7 @@ class PostProcessingModule:
     def _looks_like_html(text: str) -> bool:
         return bool(
             re.search(
-                r"(?is)<\s*/?\s*(h1|h2|h3|p|ul|ol|li|article|footer|figure|time|em|strong|a)\b",
+                r"(?is)<\s*/?\s*(h1|h2|h3|p|ul|ol|li|article|footer|time|em|strong|a)\b",
                 text,
             )
         )
@@ -197,7 +183,7 @@ class PostProcessingModule:
         normalized = re.sub(r"(?is)<\s*h2[^>]*>", "\n## ", normalized)
         normalized = re.sub(r"(?is)<\s*h3[^>]*>", "\n### ", normalized)
         normalized = re.sub(r"(?is)<\s*li[^>]*>", "\n- ", normalized)
-        normalized = re.sub(r"(?is)</(h1|h2|h3|p|ul|ol|li|article|footer|figure|time|em|strong|a)>", "\n", normalized)
+        normalized = re.sub(r"(?is)</(h1|h2|h3|p|ul|ol|li|article|footer|time|em|strong|a)>", "\n", normalized)
         normalized = re.sub(r"(?is)<br\s*/?>", "\n", normalized)
         normalized = re.sub(r"(?is)<[^>]+>", "", normalized)
         normalized = unescape(normalized)

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import base64
 import re
 from dataclasses import dataclass
 from logging import Logger
 
-from post_bot.application.ports import ArtifactStoragePort, GeneratedImageAsset, ImageClientPort
+from post_bot.application.ports import ArtifactStoragePort
 from post_bot.application.task_transitions import transition_task_status
 from post_bot.application.upload_status import resolve_upload_status_from_tasks
 from post_bot.domain.protocols.unit_of_work import UnitOfWork
-from post_bot.pipeline.modules.post_processing import PostProcessingModule, RenderedContent
+from post_bot.pipeline.modules.post_processing import PostProcessingModule
 from post_bot.shared.enums import ArtifactType, GenerationStatus, TaskStatus
 from post_bot.shared.errors import AppError, BusinessRuleError, InternalError
 from post_bot.shared.logging import TimedLog, log_event
@@ -42,13 +41,11 @@ class RunTaskRenderingUseCase:
         artifact_storage: ArtifactStoragePort,
         post_processing: PostProcessingModule,
         logger: Logger,
-        image_client: ImageClientPort | None = None,
     ) -> None:
         self._uow = uow
         self._artifact_storage = artifact_storage
         self._post_processing = post_processing
         self._logger = logger
-        self._image_client = image_client
 
     def execute(self, command: RunTaskRenderingCommand) -> RunTaskRenderingResult:
         timer = TimedLog()
@@ -88,8 +85,7 @@ class RunTaskRenderingUseCase:
                 render_id = started.id
                 self._uow.commit()
 
-            rendered = self._post_processing.render(task=task, raw_output_text=generation.raw_output_text, image_url=None)
-            rendered = self._maybe_render_with_generated_image(task=task, generation_raw_output=generation.raw_output_text, rendered=rendered)
+            rendered = self._post_processing.render(task=task, raw_output_text=generation.raw_output_text)
 
             preview_bytes = rendered.preview_text.encode("utf-8")
             approval_document_html = self._build_approval_document_html(
@@ -198,124 +194,6 @@ class RunTaskRenderingUseCase:
                 error=internal,
                 duration_ms=timer.elapsed_ms(),
             )
-
-    def _maybe_render_with_generated_image(
-        self,
-        *,
-        task,
-        generation_raw_output: str,
-        rendered: RenderedContent,
-    ) -> RenderedContent:
-        has_image_client = self._image_client is not None
-        log_event(
-            self._logger,
-            level=20,
-            module="application.run_task_rendering",
-            action="image_generation_decision",
-            result="success",
-            extra={
-                "task_id": task.id,
-                "include_image_flag": bool(task.include_image_flag),
-                "image_client_configured": has_image_client,
-            },
-        )
-
-        if not task.include_image_flag:
-            return rendered
-
-        if self._image_client is None:
-            return rendered
-
-        try:
-            log_event(
-                self._logger,
-                level=20,
-                module="application.run_task_rendering",
-                action="image_generation_started",
-                result="success",
-                extra={"task_id": task.id, "title_chars": len(rendered.final_title_text)},
-            )
-            generated = self._image_client.generate_cover(
-                task_id=task.id,
-                article_title=rendered.final_title_text,
-                article_topic=task.topic_text,
-                article_keywords=task.keywords_text,
-                article_lead=rendered.article_lead_text,
-            )
-            image_reference, reference_kind = self._build_image_reference(generated)
-            rendered_with_image = self._post_processing.render(
-                task=task,
-                raw_output_text=generation_raw_output,
-                image_url=image_reference,
-            )
-            log_event(
-                self._logger,
-                level=20,
-                module="application.run_task_rendering",
-                action="image_generation_finished",
-                result="success",
-                extra={
-                    "task_id": task.id,
-                    "prompt_chars": len(generated.prompt_text),
-                    "provider_image_kind": "binary" if generated.content else "url",
-                    "normalized_image_reference_kind": reference_kind,
-                    "image_bytes": len(generated.content or b""),
-                    "image_url_present": bool(generated.image_url),
-                },
-            )
-            return rendered_with_image
-        except AppError as error:
-            log_event(
-                self._logger,
-                level=30,
-                module="application.run_task_rendering",
-                action="image_generation_finished",
-                result="failure",
-                error=error,
-                extra={"task_id": task.id},
-            )
-            return rendered
-        except Exception as exc:  # noqa: BLE001
-            log_event(
-                self._logger,
-                level=30,
-                module="application.run_task_rendering",
-                action="image_generation_finished",
-                result="failure",
-                error=InternalError(
-                    code="IMAGE_GENERATION_UNEXPECTED_ERROR",
-                    message="Unexpected image generation error.",
-                    details={"task_id": task.id, "error": str(exc)},
-                ),
-            )
-            return rendered
-
-    def _build_image_reference(self, generated: GeneratedImageAsset) -> tuple[str, str]:
-        if generated.content:
-            if not generated.mime_type:
-                raise InternalError(
-                    code="IMAGE_GENERATION_MIME_MISSING",
-                    message="Image mime type is missing for binary content.",
-                )
-            return self._image_data_uri(mime_type=generated.mime_type, content=generated.content), "data_uri"
-
-        if generated.image_url and generated.image_url.strip():
-            return generated.image_url.strip(), "url"
-
-        raise InternalError(
-            code="IMAGE_GENERATION_OUTPUT_EMPTY",
-            message="Image generation returned neither binary content nor image url.",
-        )
-
-    @staticmethod
-    def _image_data_uri(*, mime_type: str, content: bytes) -> str:
-        if not content:
-            raise InternalError(
-                code="IMAGE_GENERATION_OUTPUT_EMPTY",
-                message="Image binary content is empty.",
-            )
-        encoded = base64.b64encode(content).decode("ascii")
-        return f"data:{mime_type};base64,{encoded}"
 
     @staticmethod
     def _build_approval_html_file_name(*, title: str, task_id: int) -> str:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 from datetime import datetime
 import hashlib
 import json
@@ -12,7 +10,6 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
-from uuid import uuid4
 
 from post_bot.application.ports import PublisherPort
 from post_bot.infrastructure.external.telegram_delivery import TelegramDeliveryProjector
@@ -26,15 +23,6 @@ class _TelegramMessageGateway(Protocol):
         chat_id: int | str,
         text: str,
         reply_markup: dict[str, object] | None = None,
-    ) -> dict[str, Any] | None: ...
-
-    def send_photo(
-        self,
-        *,
-        chat_id: int | str,
-        photo: str | bytes,
-        caption: str | None = None,
-        file_name: str | None = None,
     ) -> dict[str, Any] | None: ...
 
 
@@ -64,40 +52,6 @@ class _HttpTelegramMessageGateway:
             return result
         return None
 
-    def send_photo(
-        self,
-        *,
-        chat_id: int | str,
-        photo: str | bytes,
-        caption: str | None = None,
-        file_name: str | None = None,
-    ) -> dict[str, Any] | None:
-        if isinstance(photo, bytes):
-            fields: dict[str, str] = {"chat_id": str(chat_id)}
-            if caption:
-                fields["caption"] = caption
-
-            boundary = f"----PostBotBoundary{uuid4().hex}"
-            body = _encode_multipart(
-                fields=fields,
-                file_field="photo",
-                file_name=file_name or "cover.png",
-                file_bytes=photo,
-                boundary=boundary,
-            )
-            result = self._request_multipart("sendPhoto", body=body, boundary=boundary)
-            if isinstance(result, dict):
-                return result
-            return None
-
-        payload: dict[str, Any] = {"chat_id": chat_id, "photo": photo}
-        if caption:
-            payload["caption"] = caption
-        result = self._request_json("sendPhoto", payload)
-        if isinstance(result, dict):
-            return result
-        return None
-
     def _request_json(self, method: str, payload: dict[str, Any]) -> Any:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
@@ -105,15 +59,6 @@ class _HttpTelegramMessageGateway:
             data=body,
             method="POST",
             headers={"Content-Type": "application/json"},
-        )
-        return self._open_and_parse(method=method, request=request)
-
-    def _request_multipart(self, method: str, *, body: bytes, boundary: str) -> Any:
-        request = Request(
-            url=f"{self._api_base}/{method}",
-            data=body,
-            method="POST",
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         return self._open_and_parse(method=method, request=request)
 
@@ -270,11 +215,6 @@ class TelegramBotPublisher(PublisherPort):
     """Publishes rendered content to Telegram channel/chat via bot token."""
 
     _TEXT_LIMIT = 4000
-    _PHOTO_CAPTION_SAFE_LIMIT = 900
-    _DATA_URI_PATTERN = re.compile(
-        r"^data:(?P<mime>[\w.+-]+/[\w.+-]+);base64,(?P<data>[A-Za-z0-9+/=\s]+)$",
-        re.IGNORECASE,
-    )
 
     def __init__(
         self,
@@ -299,7 +239,6 @@ class TelegramBotPublisher(PublisherPort):
 
         self._delivery_projector = TelegramDeliveryProjector(
             text_limit=self._TEXT_LIMIT,
-            caption_safe_limit=self._PHOTO_CAPTION_SAFE_LIMIT,
         )
 
     def publish(
@@ -313,7 +252,7 @@ class TelegramBotPublisher(PublisherPort):
         chat_id = self._resolve_chat_id(channel)
         delivery = self._delivery_projector.project(html=html)
 
-        if delivery.image_url is None and not delivery.article_chunks:
+        if not delivery.article_chunks:
             raise ValidationError(
                 code="PUBLISH_TEXT_EMPTY",
                 message="Cannot publish empty content.",
@@ -323,26 +262,9 @@ class TelegramBotPublisher(PublisherPort):
         delivery_projection_hash = self._build_delivery_projection_hash(html=html)
         external_message_id: str | None = None
         sent_parts = 0
-        photo_sent = False
-        image_kind = "none"
-        photo_fallback_reason: str | None = None
-        message_delivery = delivery
         publisher_branch = "text_only"
-        resolved_photo: tuple[str | bytes, str | None, str] | None = None
 
-        if delivery.image_url is not None:
-            resolved_photo = self._resolve_photo_payload(delivery.image_url)
-            if resolved_photo is not None:
-                image_kind = resolved_photo[2]
-                publisher_branch = "send_photo_then_messages"
-            else:
-                photo_fallback_reason = "IMAGE_PAYLOAD_UNSUPPORTED"
-                publisher_branch = "image_fallback_to_text"
-                message_delivery = self._delivery_projector.project(
-                    html=self._strip_first_image_tag(html)
-                )
-
-        resume_photo_sent, resume_sent_chunk_indices, resume_external_message_id = self._extract_resume_progress(
+        resume_sent_chunk_indices, resume_external_message_id = self._extract_resume_progress(
             resume_payload_json=resume_payload_json,
             delivery_projection_hash=delivery_projection_hash,
         )
@@ -351,67 +273,11 @@ class TelegramBotPublisher(PublisherPort):
             external_message_id = resume_external_message_id
 
         sent_chunk_indices = {
-            idx for idx in resume_sent_chunk_indices if idx < len(message_delivery.article_chunks)
+            idx for idx in resume_sent_chunk_indices if idx < len(delivery.article_chunks)
         }
-
-        if resume_photo_sent:
-            photo_sent = True
-            sent_parts += 1
-
         sent_parts += len(sent_chunk_indices)
 
-        if delivery.image_url is not None and not photo_sent:
-            if resolved_photo is not None:
-                photo_payload, file_name, image_kind = resolved_photo
-                cover_caption = (delivery.cover_caption_text or "").strip()
-
-                try:
-                    response = self._gateway.send_photo(
-                        chat_id=chat_id,
-                        photo=photo_payload,
-                        caption=None,
-                        file_name=file_name,
-                    )
-                except AppError as error:
-                    self._raise_with_progress(
-                        error=error,
-                        payload=self._build_publish_payload(
-                            channel=channel,
-                            chat_id=chat_id,
-                            delivery=delivery,
-                            message_delivery=message_delivery,
-                            external_message_id=external_message_id,
-                            scheduled_for=scheduled_for,
-                            publisher_branch=publisher_branch,
-                            photo_sent=photo_sent,
-                            image_kind=image_kind,
-                            photo_fallback_reason=photo_fallback_reason,
-                            sent_parts=sent_parts,
-                            sent_chunk_indices=sent_chunk_indices,
-                            delivery_projection_hash=delivery_projection_hash,
-                            resume_used=resume_payload_json is not None,
-                        ),
-                    )
-
-                photo_external_id = self._extract_message_id(response)
-                if external_message_id is None:
-                    external_message_id = photo_external_id
-
-                sent_parts += 1
-                photo_sent = True
-                publisher_branch = "send_photo_then_messages"
-
-            else:
-                photo_fallback_reason = "IMAGE_PAYLOAD_UNSUPPORTED"
-                publisher_branch = "image_fallback_to_text"
-                message_delivery = self._delivery_projector.project(
-                    html=self._strip_first_image_tag(html)
-                )
-                sent_chunk_indices = {
-                    idx for idx in sent_chunk_indices if idx < len(message_delivery.article_chunks)
-                }
-
-        for index, chunk in enumerate(message_delivery.article_chunks):
+        for index, chunk in enumerate(delivery.article_chunks):
             if not chunk.strip():
                 continue
             if index in sent_chunk_indices:
@@ -425,14 +291,13 @@ class TelegramBotPublisher(PublisherPort):
                     payload=self._build_publish_payload(
                         channel=channel,
                         chat_id=chat_id,
-                        delivery=delivery,
-                        message_delivery=message_delivery,
                         external_message_id=external_message_id,
                         scheduled_for=scheduled_for,
                         publisher_branch=publisher_branch,
-                        photo_sent=photo_sent,
-                        image_kind=image_kind,
-                        photo_fallback_reason=photo_fallback_reason,
+                        article_chunks_count=len(delivery.article_chunks),
+                        article_text_chars=len(delivery.telegram_article_body_text),
+                        title=delivery.final_title_text,
+                        lead=delivery.article_lead_text,
                         sent_parts=sent_parts,
                         sent_chunk_indices=sent_chunk_indices,
                         delivery_projection_hash=delivery_projection_hash,
@@ -449,14 +314,13 @@ class TelegramBotPublisher(PublisherPort):
         payload = self._build_publish_payload(
             channel=channel,
             chat_id=chat_id,
-            delivery=delivery,
-            message_delivery=message_delivery,
             external_message_id=external_message_id,
             scheduled_for=scheduled_for,
             publisher_branch=publisher_branch,
-            photo_sent=photo_sent,
-            image_kind=image_kind,
-            photo_fallback_reason=photo_fallback_reason,
+            article_chunks_count=len(delivery.article_chunks),
+            article_text_chars=len(delivery.telegram_article_body_text),
+            title=delivery.final_title_text,
+            lead=delivery.article_lead_text,
             sent_parts=sent_parts,
             sent_chunk_indices=sent_chunk_indices,
             delivery_projection_hash=delivery_projection_hash,
@@ -490,27 +354,25 @@ class TelegramBotPublisher(PublisherPort):
         *,
         resume_payload_json: dict[str, Any] | None,
         delivery_projection_hash: str,
-    ) -> tuple[bool, set[int], str | None]:
+    ) -> tuple[set[int], str | None]:
         if not isinstance(resume_payload_json, dict):
-            return False, set(), None
+            return set(), None
 
         resume_hash = resume_payload_json.get("delivery_projection_hash")
         if isinstance(resume_hash, str) and resume_hash and resume_hash != delivery_projection_hash:
-            return False, set(), None
+            return set(), None
 
         external_message_id = cls._coerce_optional_str(resume_payload_json.get("external_message_id"))
-        photo_sent = bool(resume_payload_json.get("photo_sent"))
         sent_chunk_indices = cls._parse_chunk_index_set(resume_payload_json.get("sent_chunk_indices"))
 
         progress = resume_payload_json.get("delivery_progress")
         if isinstance(progress, dict):
-            photo_sent = bool(progress.get("photo_sent", photo_sent))
             progress_external = cls._coerce_optional_str(progress.get("external_message_id"))
             if progress_external is not None:
                 external_message_id = progress_external
             sent_chunk_indices = cls._parse_chunk_index_set(progress.get("sent_chunk_indices"))
 
-        return photo_sent, sent_chunk_indices, external_message_id
+        return sent_chunk_indices, external_message_id
 
     @staticmethod
     def _coerce_optional_str(value: object) -> str | None:
@@ -528,14 +390,13 @@ class TelegramBotPublisher(PublisherPort):
             *,
         channel: str,
         chat_id: int | str,
-        delivery: Any,
-        message_delivery: Any,
         external_message_id: str | None,
         scheduled_for: datetime | None,
         publisher_branch: str,
-        photo_sent: bool,
-        image_kind: str,
-        photo_fallback_reason: str | None,
+        article_chunks_count: int,
+        article_text_chars: int,
+        title: str,
+        lead: str,
         sent_parts: int,
         sent_chunk_indices: set[int],
         delivery_projection_hash: str,
@@ -547,25 +408,17 @@ class TelegramBotPublisher(PublisherPort):
             "channel": channel,
             "resolved_chat_id": str(chat_id),
             "external_message_id": external_message_id,
-            "image_url": delivery.image_url,
-            "photo_sent": photo_sent,
-            "image_delivery_kind": image_kind,
-            "image_fallback_reason": photo_fallback_reason,
             "publisher_branch": publisher_branch,
-            "image_input_present": delivery.image_url is not None,
             "parts_sent": sent_parts,
             "sent_chunk_indices": sorted_chunk_indices,
-            "cover_caption_text": delivery.cover_caption_text,
-            "cover_caption_chars": len(delivery.cover_caption_text or ""),
-            "article_chunks_count": len(message_delivery.article_chunks),
-            "article_text_chars": len(message_delivery.telegram_article_body_text),
-            "title": message_delivery.final_title_text,
-            "lead": message_delivery.article_lead_text,
+            "article_chunks_count": article_chunks_count,
+            "article_text_chars": article_text_chars,
+            "title": title,
+            "lead": lead,
             "scheduled_for": scheduled_for.replace(microsecond=0).isoformat() if scheduled_for else None,
             "scheduler": "not_enforced",
             "delivery_projection_hash": delivery_projection_hash,
             "delivery_progress": {
-                "photo_sent": photo_sent,
                 "sent_chunk_indices": sorted_chunk_indices,
                 "external_message_id": external_message_id,
             },
@@ -584,48 +437,6 @@ class TelegramBotPublisher(PublisherPort):
                 retryable=error.retryable,
             ) from error
         raise error
-
-    @classmethod
-    def _resolve_photo_payload(
-        cls,
-        image_reference: str,
-    ) -> tuple[str | bytes, str | None, str] | None:
-        raw = image_reference.strip()
-        if not raw:
-            return None
-
-        if raw.casefold().startswith("data:"):
-            match = cls._DATA_URI_PATTERN.match(raw)
-            if match is None:
-                return None
-
-            mime = match.group("mime").lower()
-            b64_part = re.sub(r"\s+", "", match.group("data"))
-            try:
-                content = base64.b64decode(b64_part, validate=True)
-            except (ValueError, binascii.Error):
-                return None
-
-            if not content:
-                return None
-
-            extension = cls._mime_to_extension(mime)
-            file_name = f"cover.{extension}"
-            return content, file_name, "data_uri"
-
-        return raw, None, "url"
-
-    @staticmethod
-    def _mime_to_extension(mime: str) -> str:
-        if mime == "image/jpeg":
-            return "jpg"
-        if mime == "image/webp":
-            return "webp"
-        return "png"
-
-    @staticmethod
-    def _strip_first_image_tag(html: str) -> str:
-        return re.sub(r"(?is)<img[^>]*>", "", html, count=1)
 
     @staticmethod
     def _extract_message_id(response: dict[str, Any] | None) -> str | None:
@@ -695,31 +506,3 @@ class TelegramBotPublisher(PublisherPort):
             return f"@{username}"
 
         return None
-
-
-def _encode_multipart(
-    *,
-    fields: dict[str, str],
-    file_field: str,
-    file_name: str,
-    file_bytes: bytes,
-    boundary: str,
-) -> bytes:
-    chunks: list[bytes] = []
-
-    for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        chunks.append(value.encode("utf-8"))
-        chunks.append(b"\r\n")
-
-    chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-    chunks.append(
-        f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'.encode("utf-8")
-    )
-    chunks.append(b"Content-Type: application/octet-stream\r\n\r\n")
-    chunks.append(file_bytes)
-    chunks.append(b"\r\n")
-    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
-
-    return b"".join(chunks)

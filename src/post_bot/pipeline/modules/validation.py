@@ -9,10 +9,8 @@ from typing import Any, Callable
 from post_bot.domain.models import NormalizedTaskConfig, ParsedExcelData, UploadValidationErrorItem
 from post_bot.shared.constants import (
     ALL_FIELDS,
-    DEFAULT_INCLUDE_IMAGE,
     IGNORED_LEGACY_FIELDS,
     MAX_FOOTER_LINK_CHARS,
-    INCLUDE_IMAGE_VALUES,
     MAX_FOOTER_TEXT_CHARS,
     MAX_KEYWORDS_CHARS,
     MAX_TITLE_CHARS,
@@ -20,7 +18,7 @@ from post_bot.shared.constants import (
     RESPONSE_LANGUAGE_VALUES,
     SCHEDULE_DATETIME_FORMAT,
 )
-from post_bot.shared.enums import IncludeImageExcelValue, PublishMode
+from post_bot.shared.enums import PublishMode
 
 
 @dataclass(slots=True, frozen=True)
@@ -137,29 +135,6 @@ class ExcelContractValidator:
         if title is not None:
             self._validate_max_length(upload_id, excel_row, "title", title, MAX_TITLE_CHARS, errors)
 
-        include_image_raw = values.get("include_image")
-        include_image_excel = self._normalize_include_image_value(include_image_raw)
-        if include_image_excel is None:
-            errors.append(
-                UploadValidationErrorItem(
-                    upload_id=upload_id,
-                    excel_row=excel_row,
-                    column_name="include_image",
-                    error_code="INCLUDE_IMAGE_INVALID",
-                    error_message="include_image must be TRUE or FALSE.",
-                    bad_value=self._value_to_error_text(include_image_raw),
-                )
-            )
-            include_image_excel = DEFAULT_INCLUDE_IMAGE
-        self._validate_enum(
-            upload_id,
-            excel_row,
-            "include_image",
-            include_image_excel,
-            INCLUDE_IMAGE_VALUES,
-            errors,
-        )
-
         schedule_raw = values.get("schedule_at")
         schedule_at = self._parse_schedule_at(schedule_raw)
         if schedule_at is None and schedule_raw not in (None, "") and self._optional_text(schedule_raw) is not None:
@@ -219,7 +194,6 @@ class ExcelContractValidator:
             title=title,
             keywords=keywords,
             response_language=response_language,
-            include_image=include_image_excel == IncludeImageExcelValue.TRUE.value,
             footer_text=footer_text,
             footer_link=footer_link,
             schedule_at=schedule_at,
@@ -323,19 +297,6 @@ class ExcelContractValidator:
                 bad_value=str(len(value)),
             )
         )
-
-    @staticmethod
-    def _normalize_include_image_value(value: Any) -> str | None:
-        if value is None:
-            return DEFAULT_INCLUDE_IMAGE
-        if isinstance(value, bool):
-            return IncludeImageExcelValue.TRUE.value if value else IncludeImageExcelValue.FALSE.value
-        if isinstance(value, str):
-            normalized = value.strip()
-            if normalized in INCLUDE_IMAGE_VALUES:
-                return normalized
-            return None
-        return None
 
     @staticmethod
     def _parse_schedule_at(value: Any) -> datetime | None:

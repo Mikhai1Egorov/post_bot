@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from post_bot.shared.enums import IncludeImageExcelValue, InterfaceLanguage
+from post_bot.shared.enums import InterfaceLanguage
 
 REQUIRED_FIELDS: tuple[str, ...] = (
     "channel",
@@ -13,7 +13,6 @@ REQUIRED_FIELDS: tuple[str, ...] = (
 )
 
 OPTIONAL_FIELDS: tuple[str, ...] = (
-    "include_image",
     "footer_text",
     "footer_link",
     "schedule_at",
@@ -29,18 +28,15 @@ IGNORED_LEGACY_FIELDS: tuple[str, ...] = (
 )
 
 RESPONSE_LANGUAGE_VALUES: tuple[str, ...] = tuple(language.value for language in InterfaceLanguage)
-INCLUDE_IMAGE_VALUES: tuple[str, ...] = tuple(value.value for value in IncludeImageExcelValue)
-
-DEFAULT_INCLUDE_IMAGE: str = IncludeImageExcelValue.FALSE.value
 TASK_MAX_RETRY_ATTEMPTS: int = 3
 TASK_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 300)
 WORKER_TASK_LEASE_SECONDS: int = 120
 TELEGRAM_STARS_PROVIDER_CODE: str = "telegram_stars"
 TELEGRAM_STARS_CURRENCY_CODE: str = "XTR"
 TELEGRAM_STARS_PACKAGE_DEFINITIONS: tuple[tuple[str, int, int], ...] = (
-    ("ARTICLES_14", 14, 739),
-    ("ARTICLES_42", 42, 1499),
-    ("ARTICLES_84", 84, 2439),
+    ("ARTICLES_14", 14, 249),
+    ("ARTICLES_42", 42, 449),
+    ("ARTICLES_84", 84, 999),
 )
 STRIPE_PROVIDER_CODE: str = "stripe"
 STRIPE_PACKAGE_DEFINITIONS: tuple[tuple[str, int], ...] = tuple(
